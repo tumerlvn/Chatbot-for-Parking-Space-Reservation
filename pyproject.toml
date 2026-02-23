@@ -16,9 +16,10 @@ dependencies = [
     "openai>=2.21.0",
     "pandas>=3.0.1",
     "pydantic>=2.12.5",
-    "pymilvus>=2.6.9",
+    "pymilvus[milvus-lite]>=2.6.9",
     "python-dotenv>=1.2.1",
     "scikit-learn>=1.8.0",
     "sentence-transformers>=5.2.3",
+    "setuptools<82.0.0",
     "tiktoken>=0.12.0",
 ]
