@@ -1,17 +1,4 @@
-"""
-RAG System Evaluation Module
-
-Evaluates:
-1. Retrieval accuracy (Recall@K, Precision@K)
-2. Response time performance
-3. End-to-end system quality
-
-Metrics:
-- Recall@K: Of all relevant docs, what % were retrieved in top K?
-- Precision@K: Of K retrieved docs, what % are relevant?
-- Mean Reciprocal Rank (MRR): Position of first relevant document
-- Response Time: Time to generate answer
-"""
+"""RAG system evaluation: retrieval accuracy, response time, quality metrics."""
 
 import time
 import json
@@ -21,7 +8,7 @@ from dataclasses import dataclass, asdict
 
 @dataclass
 class EvaluationResult:
-    """Result of a single evaluation"""
+    """Single evaluation result with retrieval and quality metrics."""
     query: str
     retrieved_docs: int
     relevant_docs: int
@@ -36,21 +23,14 @@ class EvaluationResult:
 
 
 class RAGEvaluator:
-    """Evaluates RAG system performance"""
+    """Evaluate RAG system performance with test queries and ground truth."""
 
     def __init__(self):
-        """Initialize evaluator with test dataset"""
+        """Initialize evaluator with test dataset."""
         self.test_cases = self._create_test_dataset()
 
     def _create_test_dataset(self) -> List[Dict]:
-        """
-        Create evaluation dataset with queries and ground truth.
-
-        Each test case has:
-        - query: Test question
-        - relevant_keywords: Keywords that should appear in relevant docs
-        - expected_answer_contains: Phrases expected in the answer
-        """
+        """Create test dataset with queries, keywords, and expected answers."""
         return [
             {
                 "query": "What are your operating hours?",
@@ -120,17 +100,7 @@ class RAGEvaluator:
         retriever,
         k_values: List[int] = [3, 10]
     ) -> Dict[str, float]:
-        """
-        Evaluate retrieval accuracy.
-
-        Args:
-            vector_store: Milvus vector store
-            retriever: Compression retriever with reranker
-            k_values: K values for Recall@K and Precision@K
-
-        Returns:
-            Dict with average metrics across all queries
-        """
+        """Evaluate retrieval accuracy with Recall@K, Precision@K, and MRR."""
         results = []
 
         for test_case in self.test_cases:
@@ -206,15 +176,7 @@ class RAGEvaluator:
         self,
         chatbot
     ) -> Tuple[Dict[str, float], List[EvaluationResult]]:
-        """
-        Evaluate end-to-end chatbot performance.
-
-        Args:
-            chatbot: ParkingChatbot instance
-
-        Returns:
-            Tuple of (metrics, detailed_results)
-        """
+        """Evaluate end-to-end chatbot performance with response time and quality."""
         results = []
 
         for test_case in self.test_cases:
@@ -289,16 +251,7 @@ class RAGEvaluator:
         e2e_results: List[EvaluationResult],
         output_file: str = "evaluation_report.json"
     ):
-        """
-        Generate comprehensive evaluation report.
-
-        Args:
-            retrieval_metrics: Metrics from retrieval evaluation
-            retrieval_results: Detailed retrieval results
-            e2e_metrics: Metrics from end-to-end evaluation
-            e2e_results: Detailed end-to-end results
-            output_file: Where to save the report
-        """
+        """Generate comprehensive evaluation report and save to JSON."""
         report = {
             "evaluation_date": time.strftime("%Y-%m-%d %H:%M:%S"),
             "retrieval_evaluation": {
@@ -322,12 +275,12 @@ class RAGEvaluator:
         return report
 
     def print_summary(self, retrieval_metrics: Dict, e2e_metrics: Dict):
-        """Print evaluation summary to console"""
+        """Print evaluation summary to console."""
         print("\n" + "="*70)
         print("RAG SYSTEM EVALUATION SUMMARY")
         print("="*70)
 
-        print("\n📊 RETRIEVAL METRICS:")
+        print("\n RETRIEVAL METRICS:")
         print(f"  Recall@3:     {retrieval_metrics['avg_recall_at_3']:.2%}")
         print(f"  Precision@3:  {retrieval_metrics['avg_precision_at_3']:.2%}")
         print(f"  Recall@10:    {retrieval_metrics['avg_recall_at_10']:.2%}")
@@ -335,7 +288,7 @@ class RAGEvaluator:
         print(f"  MRR:          {retrieval_metrics['avg_mrr']:.3f}")
         print(f"  Avg Time:     {retrieval_metrics['avg_retrieval_time']:.3f}s")
 
-        print("\n🎯 END-TO-END METRICS:")
+        print("\n END-TO-END METRICS:")
         print(f"  Avg Response Time:  {e2e_metrics['avg_response_time']:.3f}s")
         print(f"  Avg Quality Score:  {e2e_metrics['avg_quality_score']:.2%}")
         print(f"  Excellent:          {e2e_metrics['excellent_responses']}/{e2e_metrics['total_queries']}")

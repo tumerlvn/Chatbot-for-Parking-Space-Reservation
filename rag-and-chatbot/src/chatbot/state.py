@@ -1,34 +1,29 @@
-"""
-GraphState: The state object passed between nodes in the LangGraph.
-This tracks the conversation history, user intent, and reservation data.
-"""
+"""State definitions for LangGraph chatbot."""
 
 from typing import TypedDict, Annotated, List, Optional
 from langgraph.graph.message import add_messages
 
 
 class ReservationData(TypedDict, total=False):
-    """Tracks reservation information being collected"""
+    """Reservation information collected from user."""
     name: Optional[str]
     car_number: Optional[str]
     start_time: Optional[str]
     end_time: Optional[str]
-    availability_checked: Optional[bool]  # Flag to track if availability was verified
-    available_spots: Optional[list]       # List of available spots from database
-    count_by_type: Optional[dict]         # Count of available spots by type
+    availability_checked: Optional[bool]
+    available_spots: Optional[list]
+    count_by_type: Optional[dict]
+    preferred_spot_type: Optional[str]
+    reservation_id: Optional[int]
+    assigned_spot_id: Optional[int]
+    status: Optional[str]
+    admin_decision_time: Optional[str]
 
 
 class GraphState(TypedDict):
-    """
-    The state that flows through the graph.
-
-    Attributes:
-        messages: Conversation history (using LangGraph's add_messages reducer)
-        intent: Current user intent ('question', 'reservation', or None)
-        reservation_data: Dictionary storing collected reservation info
-        next_action: What the graph should do next
-    """
+    """State that flows through the LangGraph."""
     messages: Annotated[List, add_messages]
     intent: Optional[str]
     reservation_data: ReservationData
     next_action: Optional[str]
+    thread_id: Optional[str]

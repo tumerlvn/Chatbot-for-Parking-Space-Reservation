@@ -1,27 +1,14 @@
-"""
-Guard Rails Module for Sensitive Data Protection
-
-Implements filtering to prevent exposure of:
-- PII (Personally Identifiable Information)
-- Internal system information
-- Other users' private data
-- Database credentials/paths
-
-Uses pattern matching and NLP for detection.
-"""
+"""Sensitive data protection for chatbot responses."""
 
 import re
 from typing import Dict, List, Tuple
 
 
 class GuardRails:
-    """
-    Guard rails system to filter sensitive information from bot responses.
-    """
+    """Filter sensitive information from bot responses."""
 
     def __init__(self):
-        """Initialize guard rails with detection patterns"""
-        # PII patterns (excluding user's own data)
+        """Initialize guard rails with detection patterns."""
         self.pii_patterns = {
             "email": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
             "phone": r'\b(?:\+?1[-.]?)?\(?([0-9]{3})\)?[-.]?([0-9]{3})[-.]?([0-9]{4})\b',
@@ -50,15 +37,7 @@ class GuardRails:
         ]
 
     def scan_for_sensitive_data(self, text: str) -> Tuple[bool, List[str]]:
-        """
-        Scan text for sensitive information.
-
-        Args:
-            text: Text to scan
-
-        Returns:
-            Tuple of (has_sensitive_data: bool, violations: List[str])
-        """
+        """Scan text for PII, system info, and forbidden keywords."""
         violations = []
 
         # Check PII patterns
@@ -80,16 +59,7 @@ class GuardRails:
         return len(violations) > 0, violations
 
     def filter_response(self, response: str, user_context: Dict = None) -> str:
-        """
-        Filter a bot response to remove or redact sensitive information.
-
-        Args:
-            response: Bot's response text
-            user_context: Dict with user's own data (name, car_number) - these are allowed
-
-        Returns:
-            Filtered response
-        """
+        """Redact sensitive information from bot response."""
         has_violation, violations = self.scan_for_sensitive_data(response)
 
         if not has_violation:
@@ -150,15 +120,7 @@ class GuardRails:
         return filtered
 
     def validate_user_query(self, query: str) -> Tuple[bool, str]:
-        """
-        Validate user query for malicious patterns or injection attempts.
-
-        Args:
-            query: User's input query
-
-        Returns:
-            Tuple of (is_safe: bool, reason: str)
-        """
+        """Validate query for SQL injection, command injection, and path traversal."""
         query_lower = query.lower()
 
         # SQL injection patterns
@@ -197,41 +159,25 @@ class GuardRails:
         return True, "Safe"
 
     def filter_retrieval_results(self, documents: List, user_data: Dict = None) -> List:
-        """
-        Filter retrieved documents to ensure no sensitive data leaks.
-
-        Args:
-            documents: List of retrieved documents
-            user_data: User's own reservation data (allowed to show)
-
-        Returns:
-            Filtered list of documents
-        """
+        """Filter retrieved documents to prevent sensitive data leaks."""
         filtered_docs = []
 
         for doc in documents:
             content = doc.page_content if hasattr(doc, 'page_content') else str(doc)
 
-            # Check if document contains other users' data
-            # This is a simple check - in production, you'd want more sophisticated logic
             has_sensitive, violations = self.scan_for_sensitive_data(content)
 
             if not has_sensitive:
                 filtered_docs.append(doc)
-            else:
-                # Optionally: redact and include, or skip entirely
-                # For now, we skip documents with sensitive data
-                continue
 
         return filtered_docs
 
 
-# Global instance
 _guard_rails = None
 
 
 def get_guard_rails() -> GuardRails:
-    """Get or create global guard rails instance"""
+    """Get or create global guard rails instance."""
     global _guard_rails
     if _guard_rails is None:
         _guard_rails = GuardRails()
@@ -239,29 +185,12 @@ def get_guard_rails() -> GuardRails:
 
 
 def apply_guardrails(response: str, user_context: Dict = None) -> str:
-    """
-    Convenience function to apply guard rails to a response.
-
-    Args:
-        response: Bot response
-        user_context: User's data context
-
-    Returns:
-        Filtered response
-    """
+    """Apply guard rails to filter sensitive information from response."""
     guard_rails = get_guard_rails()
     return guard_rails.filter_response(response, user_context)
 
 
 def validate_query(query: str) -> Tuple[bool, str]:
-    """
-    Convenience function to validate user query.
-
-    Args:
-        query: User input
-
-    Returns:
-        (is_safe, reason)
-    """
+    """Validate user query for malicious patterns."""
     guard_rails = get_guard_rails()
     return guard_rails.validate_user_query(query)

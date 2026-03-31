@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.110.0",
     "jupyter>=1.1.1",
     "langchain>=1.2.10",
     "langchain-azure-ai>=1.1.1",
@@ -14,6 +15,7 @@ dependencies = [
     "langchain-openai>=1.1.10",
     "langchain-text-splitters>=1.1.0",
     "langgraph>=0.2.70",
+    "langgraph-checkpoint-sqlite>=2.0.1",
     "matplotlib>=3.8.0",
     "numpy>=2.4.2",
     "openai>=2.21.0",
@@ -25,4 +27,5 @@ dependencies = [
     "sentence-transformers>=5.2.3",
     "setuptools<82.0.0",
     "tiktoken>=0.12.0",
+    "uvicorn[standard]>=0.27.0",
 ]
