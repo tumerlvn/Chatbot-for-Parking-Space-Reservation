@@ -2,7 +2,7 @@
 
 An intelligent conversational AI system for parking facility management using RAG (Retrieval-Augmented Generation) and LangGraph.
 
-**Current Status:** Stage 2 Complete (Human-in-the-Loop Admin Approval System)
+**Current Status:** Stage 2 Complete (Two-Agent Architecture with Human-in-the-Loop Admin Approval)
 
 ---
 
@@ -74,36 +74,44 @@ Bot: Reservation Status
 
 ## Architecture
 
+**Two-Agent System:**
+
 ```
-User Input → LangGraph Router → [Q&A | Reservation | Status Check] → Response
-                                  ↓           ↓                ↓
-                      Milvus Vector DB    SQLite Database    Checkpoint Store
-                      (Policy Knowledge)  (Availability)     (Conversation State)
-                                                ↓
-                                          [INTERRUPT] ← Admin REST API
-                                                ↓
-                                        Resume & Finalize
+USER AGENT (Non-Blocking):
+User Input → Router → [Q&A | Reservation | Status] → Response
+                         ↓         ↓
+                   Milvus DB   SQLite DB → Creates pending reservation
+                                              ↓
+                                        User continues chatting
+
+ADMIN AGENT (With Interrupt):
+Admin Input → Router → [List Pending | Approve/Reject]
+                              ↓              ↓
+                         Shows list    [INTERRUPT] → REST API confirms
+                                              ↓
+                                       Execute action → Update DB
 ```
 
 **Key Technologies:**
 
-- **LangGraph** - Conversation flow with interrupt pattern for human-in-the-loop
+- **LangGraph** - Two separate conversation graphs with interrupt pattern
 - **Milvus Lite** - Semantic search over policies
-- **SQLite** - Real-time spot availability and reservation persistence
-- **SqliteSaver** - Cross-process checkpoint storage for state management
-- **FastAPI** - REST API for admin approval/rejection
+- **SQLite** - Shared database for coordination between agents
+- **SqliteSaver** - Separate checkpoint storage for each agent
+- **FastAPI** - REST API to resume admin agent after confirmation
 - **Azure OpenAI** - Language understanding and generation (GPT-4o-mini)
 - **HuggingFace** - Embeddings (all-MiniLM-L6-v2) and reranking (bge-reranker-base)
 
-**Stage 2 Human-in-the-Loop Flow:**
+**Stage 2 Two-Agent Flow:**
 
-1. User completes reservation details
-2. Chatbot creates pending reservation in database
-3. Graph execution **pauses** at interrupt point (await_approval node)
-4. Admin reviews via REST API and approves/rejects
-5. API updates graph state and resumes execution
-6. Chatbot finalizes reservation (updates DB, marks spot as occupied)
-7. User can check status via chatbot
+1. User completes reservation details in User Agent
+2. User Agent creates pending reservation in database and continues conversation
+3. Admin uses Admin Agent CLI to list pending reservations
+4. Admin types "approve ID" - Admin Agent pauses at interrupt
+5. Admin runs curl command to REST API
+6. API resumes Admin Agent graph, updates database, marks spot as occupied
+7. Admin Agent automatically shows completion message
+8. User can check status via User Agent chatbot
 
 ---
 
@@ -175,26 +183,38 @@ response = chatbot.chat("What are your hours?")
 print(response)
 ```
 
-**Option 3: Jupyter Notebook**
+### Run the Admin System (Stage 2)
+
+Stage 2 provides two ways for administrators to manage reservations:
+
+**Option 1: Admin CLI (Recommended)**
+
+Interactive conversational interface for admins:
 
 ```bash
-jupyter notebook rag-and-chatbot/src/notebooks/test_stage2.ipynb
+cd rag-and-chatbot
+source ../.venv/bin/activate
+python -m src.chatbot.admin_main
 ```
 
-### Run the Admin API (Stage 2)
+Commands:
 
-The Admin API allows administrators to approve or reject pending reservations.
+- `list` - Show pending reservations
+- `approve ID` - Approve a reservation (triggers interrupt)
+- `reject ID` - Reject a reservation (triggers interrupt)
+- `reset` - Start new conversation
+- `exit` - Quit
 
-**Start the API server:**
+The CLI automatically polls for completion after triggering an approval/rejection.
+
+**Option 2: REST API**
+
+Start the API server for programmatic access:
 
 ```bash
-python rag-and-chatbot/src/api/run_api.py
-```
-
-Or with custom settings:
-
-```bash
-python rag-and-chatbot/src/api/run_api.py --host 0.0.0.0 --port 8000 --reload
+cd rag-and-chatbot
+source ../.venv/bin/activate
+python -m src.api.admin_api
 ```
 
 The API will be available at:
@@ -266,14 +286,39 @@ Response:
 
 **Testing the full flow:**
 
-1. Start the chatbot in one terminal
-2. Start the Admin API in another terminal
-3. Make a reservation via chatbot
-4. Check pending reservations: `curl http://localhost:8000/reservations/pending`
-5. Approve via API
-6. Check status in chatbot: "What's my reservation status?"
+1. Terminal 1: Start the User Agent chatbot
 
-Alternatively you can do all the testing in `test_stage2.ipynb`
+   ```bash
+   python -m src.chatbot.main
+   ```
+
+2. Terminal 2: Start the Admin Agent CLI
+
+   ```bash
+   python -m src.chatbot.admin_main
+   ```
+
+3. Terminal 3: Start the REST API
+
+   ```bash
+   python -m src.api.admin_api
+   ```
+
+4. In Terminal 1, make a reservation via chatbot
+
+5. In Terminal 2, list and approve:
+
+   ```
+   Admin: list
+   Admin: approve 1
+   [Wait for polling dots...]
+   ```
+
+6. In Terminal 4, run the curl command shown in Terminal 2
+
+7. Terminal 2 will automatically show completion message
+
+8. In Terminal 1, check status: "What's my reservation status?"
 
 ---
 
@@ -289,16 +334,19 @@ rag-and-chatbot/
 │
 ├── src/
 │   ├── chatbot/
-│   │   ├── state.py            # Conversation state (Stage 2: added thread_id, reservation fields)
-│   │   ├── nodes.py            # Bot logic (router, Q&A, reservation, status checker)
-│   │   ├── graph.py            # Flow orchestration (Stage 2: interrupt pattern, SqliteSaver)
-│   │   ├── main.py             # Entry point
+│   │   ├── state.py            # User agent conversation state
+│   │   ├── nodes.py            # User agent nodes (router, Q&A, reservation, status)
+│   │   ├── graph.py            # User agent graph (no interrupt)
+│   │   ├── main.py             # User agent CLI entry point
+│   │   ├── admin_state.py      # Admin agent conversation state (NEW)
+│   │   ├── admin_nodes.py      # Admin agent nodes (list, approve, reject) (NEW)
+│   │   ├── admin_graph.py      # Admin agent graph (with interrupt) (NEW)
+│   │   ├── admin_main.py       # Admin agent CLI with polling (NEW)
 │   │   ├── guardrails.py       # Data protection & security
 │   │   └── evaluation.py       # RAG performance metrics
 │   │
 │   ├── api/                    # Stage 2: Admin REST API
-│   │   ├── admin_api.py        # FastAPI server with approval endpoints
-│   │   └── run_api.py          # API launcher script
+│   │   └── admin_api.py        # FastAPI server for resuming admin agent
 │   │
 │   └── notebooks/
 │       ├── generate_data.ipynb     # Setup databases (Stage 2: added thread_id column)
@@ -328,20 +376,24 @@ rag-and-chatbot/
 | **Conversation Memory**    | Maintains context across multiple messages                          |
 | **Multi-Interface**        | CLI, Python API, and Jupyter notebook support                       |
 
-### Stage 2: Human-in-the-Loop Admin Approval
+### Stage 2: Two-Agent Architecture with Human-in-the-Loop
 
-| Feature                         | Description                                                      |
-| ------------------------------- | ---------------------------------------------------------------- |
-| **Spot Type Preference**        | User selects preferred spot type (Standard, EV, Accessible)      |
-| **Database Persistence**        | Reservations stored in SQLite with status tracking               |
-| **LangGraph Interrupt Pattern** | Graph pauses at approval node, waits for admin action            |
-| **Cross-Process State Sharing** | SqliteSaver enables notebook and API to share conversation state |
-| **Admin REST API**              | FastAPI server with approve/reject endpoints                     |
-| **Thread ID Management**        | Links reservations to conversation threads for resumption        |
-| **Status Checking**             | Users can query reservation status via chatbot                   |
-| **Automatic Spot Assignment**   | Assigns specific spot based on user preference                   |
-| **Admin Decision Tracking**     | Records approval time and admin notes in state                   |
-| **Spot Occupancy Management**   | Updates spot status to "occupied" on approval                    |
+| Feature                         | Description                                                          |
+| ------------------------------- | -------------------------------------------------------------------- |
+| **Two Separate Agents**         | User Agent (non-blocking) and Admin Agent (with interrupt)           |
+| **User Agent Continuity**       | Users can continue chatting after creating reservation               |
+| **Admin Conversational CLI**    | Natural language interface: "list", "approve 5", "reject 3"          |
+| **Automatic Polling**           | Admin CLI polls for completion and shows result automatically        |
+| **Spot Type Preference**        | User selects preferred spot type (Standard, EV, Accessible)          |
+| **Database Coordination**       | SQLite database shared between both agents as single source of truth |
+| **Separate Checkpoints**        | Each agent has independent conversation state storage                |
+| **LangGraph Interrupt Pattern** | Admin Agent pauses at execute_action, waits for API confirmation     |
+| **Admin REST API**              | FastAPI server resumes admin agent graph after human confirmation    |
+| **Status Checking**             | Users query reservation status via User Agent chatbot                |
+| **Automatic Spot Assignment**   | Assigns specific spot based on user preference                       |
+| **Admin Decision Tracking**     | Records approval time and admin notes in database                    |
+| **Spot Occupancy Management**   | Updates spot status to "occupied" on approval                        |
+| **Detailed API Logging**        | Logs graph execution and database updates for debugging              |
 
 ### Security & Data Protection
 
@@ -481,22 +533,37 @@ jupyter notebook rag-and-chatbot/src/notebooks/generate_data.ipynb
 
 - **[PHASE1.md](./PHASE1.md)** - Stage 1 technical documentation
 - **[STAGE1_COMPLETE.md](./STAGE1_COMPLETE.md)** - Stage 1 completion summary
+- **[STAGE2_QUICKSTART.md](./STAGE2_QUICKSTART.md)** - Stage 2 quick start guide
 - **[PROJECT_SCHEMA.md](./PROJECT_SCHEMA.md)** - Complete architecture overview
 - **API Documentation** - Interactive docs at http://localhost:8000/docs (when API server is running)
 - **Inline Code Comments** - Throughout all Python files
 
 ### Key Concepts
 
-**LangGraph Interrupt Pattern (Stage 2):**
+**Two-Agent Architecture (Stage 2):**
 
-- Graph execution pauses at designated interrupt nodes
-- External systems (Admin API) can inspect and modify state
-- State updates trigger graph resumption
-- Enables human-in-the-loop workflows without blocking
+- User Agent has no interrupts - conversation flows freely
+- Admin Agent has interrupt at execute_action node
+- Both agents coordinate via shared SQLite database
+- Database is the single source of truth for reservations
 
-**Cross-Process State Management:**
+**LangGraph Interrupt Pattern:**
 
-- SqliteSaver stores checkpoints in file-based SQLite database
-- Multiple processes (notebook, API) can access same conversation state
-- Thread ID links database reservations to conversation threads
-- Enables async admin approval while maintaining conversation context
+- Admin Agent execution pauses at designated interrupt node
+- REST API inspects state, updates action_data, and resumes graph
+- State updates trigger graph resumption and database updates
+- Enables human-in-the-loop workflows for administrative actions
+
+**Independent State Management:**
+
+- Each agent has separate SqliteSaver checkpoint database
+- User Agent: checkpoints.sqlite
+- Admin Agent: admin_checkpoints.sqlite
+- Prevents state conflicts between concurrent agent operations
+
+**Automatic Polling:**
+
+- Admin CLI detects interrupt in response
+- Polls graph state every 2 seconds for new messages
+- Automatically displays completion message when API resumes graph
+- 120-second timeout with clear error messages

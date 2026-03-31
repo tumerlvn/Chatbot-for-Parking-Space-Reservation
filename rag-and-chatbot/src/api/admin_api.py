@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from chatbot.graph import create_chatbot_graph
+from chatbot.admin_graph import create_admin_graph
 
 
 app = FastAPI(
@@ -20,7 +20,7 @@ app = FastAPI(
     version="2.0.0"
 )
 
-chatbot_graph = create_chatbot_graph()
+admin_agent_graph = create_admin_graph()
 
 
 @contextmanager
@@ -111,18 +111,27 @@ def get_pending_reservations():
 
 
 @app.post("/reservations/{reservation_id}/approve")
-def approve_reservation(reservation_id: int, request: ApprovalRequest):
-    """Approve a pending reservation and resume graph execution."""
+def approve_reservation(reservation_id: int, request: ApprovalRequest, thread_id: str = "admin_admin1"):
+    """
+    Approve reservation - called from admin CLI after interrupt.
+    Resumes admin agent graph execution.
+
+    Args:
+        reservation_id: The reservation to approve
+        request: Approval request with decision and notes
+        thread_id: Admin agent thread ID (from curl command)
+    """
     if request.decision != "approve":
         raise HTTPException(
             status_code=400,
             detail="Use /approve endpoint only for approvals"
         )
 
+    # Get reservation from DB
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, user_name, car_number, thread_id, status
+            SELECT id, user_name, car_number, status
             FROM reservations
             WHERE id = ?
         """, (reservation_id,))
@@ -134,7 +143,7 @@ def approve_reservation(reservation_id: int, request: ApprovalRequest):
             detail=f"Reservation #{reservation_id} not found"
         )
 
-    res_id, user_name, car_number, thread_id, current_status = result
+    res_id, user_name, car_number, current_status = result
 
     if current_status != "pending":
         raise HTTPException(
@@ -142,34 +151,56 @@ def approve_reservation(reservation_id: int, request: ApprovalRequest):
             detail=f"Reservation #{reservation_id} is already {current_status}"
         )
 
-    if not thread_id:
-        thread_id = f"reservation_{reservation_id}"
-
+    # Get admin agent state using provided thread_id
     config = {"configurable": {"thread_id": thread_id}}
+    print(f"[API] Using thread_id: {thread_id}")
 
     try:
-        current_state = chatbot_graph.get_state(config)
+        current_state = admin_agent_graph.get_state(config)
 
         if not current_state.values:
             raise HTTPException(
                 status_code=500,
-                detail=f"Could not find conversation state for reservation #{reservation_id}"
+                detail="Could not find admin conversation state"
             )
 
-        current_reservation_data = current_state.values.get("reservation_data", {})
-        updated_reservation_data = {
-            **current_reservation_data,
-            "status": "approved",
-            "admin_decision_time": datetime.now().isoformat(),
+        # Update action_data with completion flag
+        current_action_data = current_state.values.get("action_data", {})
+        updated_action_data = {
+            **current_action_data,
+            "completed": True,
             "admin_notes": request.admin_notes
         }
 
-        chatbot_graph.update_state(
+        # Update state
+        print(f"[API] Updating action_data to: {updated_action_data}")
+        admin_agent_graph.update_state(
             config,
-            {"reservation_data": updated_reservation_data}
+            {"action_data": updated_action_data}
         )
 
-        chatbot_graph.invoke(None, config)
+        # Resume execution (will execute execute_action_node)
+        print(f"[API] Resuming admin agent graph for reservation #{reservation_id}")
+
+        # Pass None as input to resume from interrupt
+        result = admin_agent_graph.invoke(None, config)
+
+        print(f"[API] Graph execution result: {result}")
+        print(f"[API] Graph execution completed: action_data = {result.get('action_data', {})}")
+
+        # Verify the database was updated
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT status FROM reservations WHERE id = ?", (reservation_id,))
+            db_result = cursor.fetchone()
+            if db_result:
+                db_status = db_result[0]
+                print(f"[API] Database status for reservation #{reservation_id}: {db_status}")
+                if db_status != "approved":
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Graph executed but database not updated. Current status: {db_status}"
+                    )
 
         return {
             "success": True,
@@ -177,10 +208,15 @@ def approve_reservation(reservation_id: int, request: ApprovalRequest):
             "status": "approved",
             "user_name": user_name,
             "car_number": car_number,
-            "message": "Reservation approved and finalized successfully"
+            "message": "Reservation approved successfully"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"[API] Error processing approval: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail=f"Failed to process approval: {str(e)}"
@@ -188,19 +224,27 @@ def approve_reservation(reservation_id: int, request: ApprovalRequest):
 
 
 @app.post("/reservations/{reservation_id}/reject")
-def reject_reservation(reservation_id: int, request: ApprovalRequest):
-    """Reject a pending reservation."""
+def reject_reservation(reservation_id: int, request: ApprovalRequest, thread_id: str = "admin_admin1"):
+    """
+    Reject reservation - called from admin CLI after interrupt.
+    Resumes admin agent graph execution.
+
+    Args:
+        reservation_id: The reservation to reject
+        request: Rejection request with decision and notes
+        thread_id: Admin agent thread ID (from curl command)
+    """
     if request.decision != "reject":
         raise HTTPException(
             status_code=400,
             detail="Use /reject endpoint only for rejections"
         )
 
-    # Get reservation details including thread_id
+    # Get reservation from DB
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, user_name, car_number, thread_id, status
+            SELECT id, user_name, car_number, status
             FROM reservations
             WHERE id = ?
         """, (reservation_id,))
@@ -212,7 +256,7 @@ def reject_reservation(reservation_id: int, request: ApprovalRequest):
             detail=f"Reservation #{reservation_id} not found"
         )
 
-    res_id, user_name, car_number, thread_id, current_status = result
+    res_id, user_name, car_number, current_status = result
 
     if current_status != "pending":
         raise HTTPException(
@@ -220,34 +264,56 @@ def reject_reservation(reservation_id: int, request: ApprovalRequest):
             detail=f"Reservation #{reservation_id} is already {current_status}"
         )
 
-    if not thread_id:
-        thread_id = f"reservation_{reservation_id}"
-
+    # Get admin agent state using provided thread_id
     config = {"configurable": {"thread_id": thread_id}}
+    print(f"[API] Using thread_id: {thread_id}")
 
     try:
-        current_state = chatbot_graph.get_state(config)
+        current_state = admin_agent_graph.get_state(config)
 
         if not current_state.values:
             raise HTTPException(
                 status_code=500,
-                detail=f"Could not find conversation state for reservation #{reservation_id}"
+                detail="Could not find admin conversation state"
             )
 
-        current_reservation_data = current_state.values.get("reservation_data", {})
-        updated_reservation_data = {
-            **current_reservation_data,
-            "status": "rejected",
-            "admin_decision_time": datetime.now().isoformat(),
+        # Update action_data with completion flag
+        current_action_data = current_state.values.get("action_data", {})
+        updated_action_data = {
+            **current_action_data,
+            "completed": True,
             "admin_notes": request.admin_notes
         }
 
-        chatbot_graph.update_state(
+        # Update state
+        print(f"[API] Updating action_data to: {updated_action_data}")
+        admin_agent_graph.update_state(
             config,
-            {"reservation_data": updated_reservation_data}
+            {"action_data": updated_action_data}
         )
 
-        chatbot_graph.invoke(None, config)
+        # Resume execution (will execute execute_action_node)
+        print(f"[API] Resuming admin agent graph for reservation #{reservation_id}")
+
+        # Pass None as input to resume from interrupt
+        result = admin_agent_graph.invoke(None, config)
+
+        print(f"[API] Graph execution result: {result}")
+        print(f"[API] Graph execution completed: action_data = {result.get('action_data', {})}")
+
+        # Verify the database was updated
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT status FROM reservations WHERE id = ?", (reservation_id,))
+            db_result = cursor.fetchone()
+            if db_result:
+                db_status = db_result[0]
+                print(f"[API] Database status for reservation #{reservation_id}: {db_status}")
+                if db_status != "rejected":
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Graph executed but database not updated. Current status: {db_status}"
+                    )
 
         return {
             "success": True,
@@ -258,7 +324,12 @@ def reject_reservation(reservation_id: int, request: ApprovalRequest):
             "message": "Reservation rejected successfully"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"[API] Error processing rejection: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail=f"Failed to process rejection: {str(e)}"
@@ -320,7 +391,7 @@ if __name__ == "__main__":
     print("API docs at: http://localhost:8000/docs")
 
     uvicorn.run(
-        "admin_api:app",
+        "src.api.admin_api:app",
         host="0.0.0.0",
         port=8000,
         reload=True
