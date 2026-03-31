@@ -15,10 +15,10 @@ def check_api_key():
 
     api_key = os.getenv("OPENAI_API_KEY")
     if api_key and api_key != "your-openai-api-key-here":
-        print("✅ OpenAI API key found")
+        print("[OK] OpenAI API key found")
         return True
     else:
-        print("❌ OpenAI API key not configured")
+        print("[FAIL] OpenAI API key not configured")
         print("   Please set OPENAI_API_KEY in .env file")
         return False
 
@@ -32,20 +32,20 @@ def check_databases():
     # Check Milvus database
     milvus_db = data_dir / "parking.db"
     if milvus_db.exists():
-        print(f"✅ Milvus database found: {milvus_db}")
+        print(f"[OK] Milvus database found: {milvus_db}")
         checks.append(True)
     else:
-        print(f"❌ Milvus database not found: {milvus_db}")
+        print(f"[FAIL] Milvus database not found: {milvus_db}")
         print("   Run generate_data.ipynb to create it")
         checks.append(False)
 
     # Check SQLite database
     sqlite_db = data_dir / "parking_db.sqlite"
     if sqlite_db.exists():
-        print(f"✅ SQLite database found: {sqlite_db}")
+        print(f"[OK] SQLite database found: {sqlite_db}")
         checks.append(True)
     else:
-        print(f"❌ SQLite database not found: {sqlite_db}")
+        print(f"[FAIL] SQLite database not found: {sqlite_db}")
         print("   Run generate_data.ipynb to create it")
         checks.append(False)
 
@@ -69,9 +69,9 @@ def check_dependencies():
     for package in required_packages:
         try:
             __import__(package)
-            print(f"✅ {package} installed")
+            print(f"[OK] {package} installed")
         except ImportError:
-            print(f"❌ {package} NOT installed")
+            print(f"[FAIL] {package} NOT installed")
             all_installed = False
 
     if not all_installed:
@@ -94,22 +94,22 @@ def check_models():
         embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
-        print("✅ Embedding model loaded")
+        print("[OK] Embedding model loaded")
 
         print("  Loading reranker model...")
         reranker = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
-        print("✅ Reranker model loaded")
+        print("[OK] Reranker model loaded")
 
         return True
     except Exception as e:
-        print(f"❌ Error loading models: {e}")
+        print(f"[FAIL] Error loading models: {e}")
         return False
 
 
 def main():
     """Run all verification checks"""
     print("="*60)
-    print("🔍 Parking Chatbot Setup Verification")
+    print("Parking Chatbot Setup Verification")
     print("="*60)
     print()
 
@@ -131,11 +131,11 @@ def main():
 
     print("="*60)
     if all([deps_ok, api_ok, db_ok, models_ok]):
-        print("✅ All checks passed! You're ready to use the chatbot.")
+        print("[OK] All checks passed! You're ready to use the chatbot.")
         print("\nTo start the chatbot:")
         print("  python -m rag_and_chatbot.src.chatbot.main")
     else:
-        print("❌ Some checks failed. Please fix the issues above.")
+        print("[FAIL] Some checks failed. Please fix the issues above.")
         sys.exit(1)
     print("="*60)
 

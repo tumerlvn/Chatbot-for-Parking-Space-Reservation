@@ -209,6 +209,6 @@ __marimo__/
 
 *.db
 *.db.lock
-*.sqlite
+*.sqlite*
 .codemie
 .vscode

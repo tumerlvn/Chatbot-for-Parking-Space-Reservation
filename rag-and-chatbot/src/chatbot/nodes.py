@@ -1,7 +1,4 @@
-"""
-Node Functions for the LangGraph Chatbot
-Each node is a function that takes GraphState and returns updated GraphState
-"""
+"""Node functions for LangGraph chatbot."""
 
 import os
 import sqlite3
@@ -20,9 +17,6 @@ from .state import GraphState
 from .guardrails import apply_guardrails, validate_query
 
 
-# ============================================================================
-# Global Setup - Initialize retrieval components (lazy loaded)
-# ============================================================================
 
 _vector_store = None
 _compression_retriever = None
@@ -72,24 +66,36 @@ def _get_llm():
     return _llm
 
 
-# ============================================================================
-# Node 1: Router - Classifies user intent
-# ============================================================================
 
 def router_node(state: GraphState) -> GraphState:
-    """
-    Analyzes the user's latest message and classifies intent.
-
-    Returns:
-        Updated state with 'intent' set to 'question' or 'reservation'
-    """
+    """Classify user intent: question, reservation, or status_check."""
     llm = _get_llm()
 
-    # Get the last user message
     last_message = state["messages"][-1]
     user_input = last_message.content if hasattr(last_message, 'content') else str(last_message)
 
-    # Use LLM to classify intent
+    reservation_data = state.get("reservation_data", {})
+    if reservation_data:
+        # Check if any reservation field exists but not all required fields are complete
+        has_some_data = any([
+            reservation_data.get("start_time"),
+            reservation_data.get("end_time"),
+            reservation_data.get("name"),
+            reservation_data.get("car_number")
+        ])
+
+        # Check if all required fields are NOT complete
+        required_fields = ["name", "car_number", "start_time", "end_time", "preferred_spot_type"]
+        is_incomplete = not all(reservation_data.get(field) for field in required_fields)
+
+        # If we have some data but it's incomplete, continue the reservation flow
+        if has_some_data and is_incomplete:
+            return {
+                **state,
+                "intent": "reservation",
+                "next_action": "route_to_handler"
+            }
+
     classification_prompt = f"""You are an intent classifier for a parking reservation chatbot.
 
 Analyze the user's message and classify it into ONE of these intents:
@@ -105,16 +111,21 @@ Analyze the user's message and classify it into ONE of these intents:
   - Provide booking details (name, car number, times)
   - Continue an ongoing reservation process
 
+"status_check" - User wants to:
+  - Check their reservation status
+  - Query about their booking
+  - Find out if reservation was approved/rejected
+  - Examples: "what's my status?", "check my reservation", "was my booking approved?"
+
 User message: "{user_input}"
 
-Respond with ONLY one word: either "question" or "reservation"
+Respond with ONLY one word: either "question", "reservation", or "status_check"
 """
 
     response = llm.invoke([SystemMessage(content=classification_prompt)])
     intent = response.content.strip().lower()
 
-    # Validate intent
-    if intent not in ["question", "reservation"]:
+    if intent not in ["question", "reservation", "status_check"]:
         intent = "question"  # Default to question if unclear
 
     return {
@@ -124,27 +135,15 @@ Respond with ONLY one word: either "question" or "reservation"
     }
 
 
-# ============================================================================
-# Node 2: RAG Node - Answers policy questions
-# ============================================================================
 
 def rag_node(state: GraphState) -> GraphState:
-    """
-    Retrieves relevant policy information and generates an answer.
-
-    Uses Milvus vector store + reranker to find relevant context,
-    then uses LLM to generate a natural language answer.
-
-    Enhancement: Also checks SQLite for real-time availability when needed.
-    """
+    """Answer questions using RAG with real-time availability checks when needed."""
     llm = _get_llm()
     retriever = _get_compression_retriever()
 
-    # Get the user's question
     last_message = state["messages"][-1]
     query = last_message.content if hasattr(last_message, 'content') else str(last_message)
 
-    # GUARD RAILS: Validate user query for injection attempts
     is_safe, reason = validate_query(query)
     if not is_safe:
         error_response = f"I'm sorry, but I cannot process that request. {reason}. Please rephrase your question."
@@ -155,13 +154,10 @@ def rag_node(state: GraphState) -> GraphState:
             "next_action": "wait_for_user"
         }
 
-    # Retrieve relevant documents from vector store
     docs = retriever.invoke(query)
 
-    # Build context from retrieved documents
     context = "\n\n".join([doc.page_content for doc in docs])
 
-    # Check if query is about availability using LLM
     availability_check_prompt = f"""Does this question ask about current availability, free spots, or if spaces are available right now?
 
 Question: "{query}"
@@ -171,7 +167,6 @@ Respond with ONLY "yes" or "no"."""
     availability_response = llm.invoke([SystemMessage(content=availability_check_prompt)])
     is_availability_query = availability_response.content.strip().lower() == "yes"
 
-    # If asking about availability, get real-time data from SQLite
     realtime_data = ""
     if is_availability_query:
         db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
@@ -195,7 +190,6 @@ Respond with ONLY "yes" or "no"."""
         else:
             realtime_data = "\n\nCurrent Real-Time Availability: No spots currently available."
 
-    # Generate answer using LLM with both policy and real-time data
     rag_prompt = f"""You are a helpful parking facility assistant. Answer the user's question based on the provided information.
 
 Policy Context:
@@ -210,10 +204,8 @@ If the information is not in the context, say so politely.
 
     response = llm.invoke([HumanMessage(content=rag_prompt)])
 
-    # GUARD RAILS: Filter response for sensitive data
     filtered_response = apply_guardrails(response.content, user_context=state.get("reservation_data", {}))
 
-    # Add AI response to messages
     updated_messages = state["messages"] + [AIMessage(content=filtered_response)]
 
     return {
@@ -223,36 +215,13 @@ If the information is not in the context, say so politely.
     }
 
 
-# ============================================================================
-# Helper Function: Check Availability
-# ============================================================================
 
 def _check_parking_availability(start_time: str, end_time: str) -> Dict[str, Any]:
-    """
-    Check parking spot availability for the given time range with time conflict detection.
-
-    Checks:
-    1. Spots with status='available'
-    2. Excludes spots that have conflicting reservations in the time range
-
-    Time conflict logic:
-    A reservation conflicts if:
-    - (reservation_start <= requested_end AND reservation_end >= requested_start)
-
-    Returns:
-        Dict with:
-        - available: bool
-        - spots: list of available spots
-        - count_by_type: dict with counts by spot type
-        - total_count: total available spots
-    """
+    """Check spot availability excluding time conflicts with existing reservations."""
     db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # Query: Get spots that are:
-    # 1. status='available'
-    # 2. NOT in reservations table with conflicting times (status != 'cancelled')
     cursor.execute("""
         SELECT
             ps.id,
@@ -278,7 +247,6 @@ def _check_parking_availability(start_time: str, end_time: str) -> Dict[str, Any
     available_spots = cursor.fetchall()
     conn.close()
 
-    # Group by type
     count_by_type = {}
     spots_list = []
 
@@ -301,32 +269,17 @@ def _check_parking_availability(start_time: str, end_time: str) -> Dict[str, Any
     }
 
 
-# ============================================================================
-# Node 3: Reservation Collector - Gathers user information
-# ============================================================================
 
 def reservation_collector_node(state: GraphState) -> GraphState:
-    """
-    Collects reservation information step by step.
-
-    Improved Flow (Stage 1 - Pre-reservation):
-    1. Ask for start_time
-    2. Ask for end_time
-    3. Check availability → If none, suggest alternatives and stop
-    4. Ask for name (only if spots available)
-    5. Ask for car_number (only if spots available)
-    6. Show summary → Ready for admin approval (Stage 2)
-    """
+    """Collect reservation details: times, availability, name, car number, spot type."""
     llm = _get_llm()
     reservation_data = state.get("reservation_data", {})
 
-    # Get the user's latest message
     last_message = state["messages"][-1]
     user_input = last_message.content if hasattr(last_message, 'content') else str(last_message)
 
     current_datetime = datetime.now()
 
-    # Extract information from user input using LLM
     extraction_prompt = f"""You are helping collect parking reservation information.
 
 Current reservation data: {reservation_data}
@@ -339,36 +292,33 @@ Extract the following information if present in the user's message:
 - car_number: License plate number
 - start_time: When they want to start parking (date and time)
 - end_time: When they want to leave (date and time)
+- preferred_spot_type: Parking spot type preference (must be exactly one of: "Standard", "EV", or "Accessible")
 
 Respond in this exact format:
 name: [extracted name or "none"]
 car_number: [extracted car number or "none"]
 start_time: [extracted start time or "none"]
 end_time: [extracted end time or "none"]
+preferred_spot_type: [extracted spot type (Standard/EV/Accessible) or "none"]
 """
 
     extraction_response = llm.invoke([HumanMessage(content=extraction_prompt)])
 
-    # Parse extracted information
     for line in extraction_response.content.split('\n'):
         if ':' in line:
             key, value = line.split(':', 1)
             key = key.strip()
             value = value.strip()
-            if value.lower() != "none" and key in ["name", "car_number", "start_time", "end_time"]:
+            if value.lower() != "none" and key in ["name", "car_number", "start_time", "end_time", "preferred_spot_type"]:
                 reservation_data[key] = value
 
-    # NEW FLOW: Ask for times FIRST, then check availability, then personal info
 
-    # Step 1: Ask for start time
     if not reservation_data.get("start_time"):
         response_text = "I'd be happy to help you with a parking reservation! When would you like to start parking? (Please provide date and time)"
 
-    # Step 2: Ask for end time
     elif not reservation_data.get("end_time"):
         response_text = "Great! And when do you plan to leave? (Please provide date and time)"
 
-    # Step 3: Check availability (after we have both times)
     elif not reservation_data.get("availability_checked"):
         availability = _check_parking_availability(
             reservation_data["start_time"],
@@ -401,8 +351,8 @@ You can also ask me about our operating hours and pricing."""
 
             response_text = f"""Great news! We have parking spots available for your requested time:
 
-📅 Time Slot: {reservation_data['start_time']} to {reservation_data['end_time']}
-✅ Available Spots:
+ Time Slot: {reservation_data['start_time']} to {reservation_data['end_time']}
+ Available Spots:
 {availability_summary}
 
 To complete your pre-reservation, I'll need a few more details.
@@ -413,39 +363,44 @@ What is your full name?"""
             reservation_data["available_spots"] = availability["spots"]
             reservation_data["count_by_type"] = availability["count_by_type"]
 
-    # Step 4: Ask for name (only after availability confirmed)
     elif not reservation_data.get("name"):
         response_text = "What is your full name?"
 
-    # Step 5: Ask for car number (only after name)
     elif not reservation_data.get("car_number"):
         response_text = f"Thank you, {reservation_data['name']}! What is your vehicle's license plate number?"
 
-    # Step 6: All information collected - show summary
-    else:
-        # Build summary of available spots from count_by_type
-        if reservation_data.get("count_by_type"):
-            spot_summary = "\n".join([
-                f"  • {spot_type}: {count} spot(s)"
-                for spot_type, count in reservation_data["count_by_type"].items()
+    elif not reservation_data.get("preferred_spot_type"):
+        # Get available spot types from count_by_type
+        count_by_type = reservation_data.get("count_by_type", {})
+        if count_by_type:
+            spot_options = "\n".join([
+                f"  • {spot_type}: {count} available"
+                for spot_type, count in count_by_type.items()
             ])
-            spot_info = f"\n✅ Available Spots:\n{spot_summary}\n"
+            response_text = f"""Great! We have the following spot types available:
+
+{spot_options}
+
+Which type would you prefer? (Please choose: Standard, EV, or Accessible)"""
         else:
-            spot_info = ""
+            # Fallback if somehow count_by_type is missing
+            response_text = "Which spot type would you prefer: Standard, EV, or Accessible?"
+
+    else:
+        # Get the preferred spot type name for display
+        preferred_type = reservation_data.get("preferred_spot_type", "Your preferred")
 
         response_text = f"""Perfect! I have collected all the information for your pre-reservation:
 
-📋 Pre-Reservation Summary:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-👤 Name: {reservation_data['name']}
-🚗 License Plate: {reservation_data['car_number']}
-📅 Start Time: {reservation_data['start_time']}
-📅 End Time: {reservation_data['end_time']}{spot_info}
-✅ Status: Awaiting Admin Approval
+ Pre-Reservation Details:
 
-Your pre-reservation request has been recorded. In the next stage, this information will be sent to our admin team for review and confirmation. You will receive a confirmation once approved.
+ Name: {reservation_data['name']}
+ License Plate: {reservation_data['car_number']}
+ Start Time: {reservation_data['start_time']}
+ End Time: {reservation_data['end_time']}
+  Preferred Spot Type: {preferred_type}
 
-Is there anything else I can help you with?"""
+Your information has been collected. Processing your reservation..."""
 
     updated_messages = state["messages"] + [AIMessage(content=response_text)]
 
@@ -453,6 +408,224 @@ Is there anything else I can help you with?"""
         **state,
         "messages": updated_messages,
         "reservation_data": reservation_data,
+        "next_action": "wait_for_user"
+    }
+
+
+
+def create_reservation_node(state: GraphState) -> GraphState:
+    """Create pending reservation in database and assign preferred spot."""
+    reservation_data = state["reservation_data"]
+
+    available_spots = reservation_data["available_spots"]
+    preferred_type = reservation_data.get("preferred_spot_type", "Standard")
+
+    selected_spot = next(
+        (spot for spot in available_spots if spot["type"] == preferred_type),
+        available_spots[0] if available_spots else None
+    )
+
+    if not selected_spot:
+        return {
+            **state,
+            "messages": state["messages"] + [AIMessage(content="Error: No available spots found. Please try again.")],
+            "next_action": "wait_for_user"
+        }
+
+    db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    thread_id = state.get("thread_id")
+
+    try:
+        cursor.execute("""
+            INSERT INTO reservations
+            (spot_id, user_name, car_number, start_time, end_time, status, thread_id)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
+        """, (
+            selected_spot["id"],
+            reservation_data["name"],
+            reservation_data["car_number"],
+            reservation_data["start_time"],
+            reservation_data["end_time"],
+            thread_id
+        ))
+        conn.commit()
+
+        reservation_id = cursor.lastrowid
+
+    finally:
+        conn.close()
+
+    updated_reservation_data = {
+        **reservation_data,
+        "reservation_id": reservation_id,
+        "assigned_spot_id": selected_spot["id"],
+        "status": "pending"
+    }
+
+    response_text = f""" Pre-reservation created successfully!
+
+ Reservation ID: #{reservation_id}
+  Assigned Spot: {selected_spot["number"]} ({selected_spot["type"]})
+ Floor: {selected_spot["floor"]}
+
+Your reservation is now pending admin approval.
+You can check the status by asking: "What's the status of my reservation?"
+"""
+
+    return {
+        **state,
+        "messages": state["messages"] + [AIMessage(content=response_text)],
+        "reservation_data": updated_reservation_data,
+        "next_action": "await_approval"
+    }
+
+
+def await_approval_node(state: GraphState) -> GraphState:
+    """Interrupt point where graph pauses for admin approval via API."""
+    reservation_id = state["reservation_data"].get("reservation_id")
+
+    print(f"[INTERRUPT] Awaiting admin approval for reservation #{reservation_id}")
+
+    return state
+
+
+def finalize_reservation_node(state: GraphState) -> GraphState:
+    """Update database with admin decision and mark spot as occupied if approved."""
+    reservation_data = state["reservation_data"]
+    reservation_id = reservation_data.get("reservation_id")
+    status = reservation_data.get("status", "pending")
+
+    if not reservation_id:
+        return state
+
+    db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    try:
+        # Update reservation status in database
+        cursor.execute("""
+            UPDATE reservations
+            SET status = ?
+            WHERE id = ?
+        """, (status, reservation_id))
+
+        # If approved, mark spot as occupied
+        if status == "approved":
+            assigned_spot_id = reservation_data.get("assigned_spot_id")
+            if assigned_spot_id:
+                cursor.execute("""
+                    UPDATE parking_spots
+                    SET status = 'occupied'
+                    WHERE id = ?
+                """, (assigned_spot_id,))
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+    return state
+
+
+def status_checker_node(state: GraphState) -> GraphState:
+    """Query and display user's most recent reservation status."""
+    reservation_data = state.get("reservation_data", {})
+    name = reservation_data.get("name")
+    car_number = reservation_data.get("car_number")
+
+    if not name and not car_number:
+        last_message = state["messages"][-1]
+        user_input = last_message.content if hasattr(last_message, 'content') else str(last_message)
+
+        # Use LLM to extract name or car number if provided
+        llm = _get_llm()
+        extraction_prompt = f"""Extract name or license plate number from this query if present:
+"{user_input}"
+
+Respond in format:
+name: [name or "none"]
+car_number: [license plate or "none"]
+"""
+        extraction_response = llm.invoke([HumanMessage(content=extraction_prompt)])
+
+        for line in extraction_response.content.split('\n'):
+            if ':' in line:
+                key, value = line.split(':', 1)
+                key = key.strip()
+                value = value.strip()
+                if value.lower() != "none" and key == "name":
+                    name = value
+                elif value.lower() != "none" and key == "car_number":
+                    car_number = value
+
+    if not name and not car_number:
+        response_text = """I don't have your reservation details in this conversation.
+Could you provide your name or license plate number so I can look up your reservation?
+
+For example: "Check status for John Smith" or "My plate is ABC-1234"
+"""
+    else:
+        db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        try:
+            # Find most recent reservation for this user
+            cursor.execute("""
+                SELECT
+                    r.id,
+                    r.status,
+                    r.start_time,
+                    r.end_time,
+                    ps.spot_number,
+                    ps.spot_type,
+                    ps.floor,
+                    r.reservation_time
+                FROM reservations r
+                JOIN parking_spots ps ON r.spot_id = ps.id
+                WHERE r.user_name = ? OR r.car_number = ?
+                ORDER BY r.reservation_time DESC
+                LIMIT 1
+            """, (name or "", car_number or ""))
+
+            result = cursor.fetchone()
+
+        finally:
+            conn.close()
+
+        if not result:
+            response_text = f"""I couldn't find any reservations for {name or car_number}.
+
+If you recently made a reservation, please make sure the name or license plate matches exactly.
+"""
+        else:
+            res_id, status, start, end, spot_num, spot_type, floor, reserved_at = result
+
+            response_text = f"""Reservation Status
+
+ Reservation ID: #{res_id}
+ Status: {status.upper()}
+  Assigned Spot: {spot_num} ({spot_type})
+ Floor: {floor}
+ Start: {start}
+ End: {end}
+ Reserved: {reserved_at}
+"""
+
+            if status == "approved":
+                response_text += "\n Your reservation has been approved! See you soon."
+            elif status == "rejected":
+                response_text += "\n Unfortunately, your reservation was not approved. Please contact us for assistance."
+            else:
+                response_text += "\n Your reservation is awaiting admin approval. We'll process it shortly."
+
+    return {
+        **state,
+        "messages": state["messages"] + [AIMessage(content=response_text)],
         "next_action": "wait_for_user"
     }
 
