@@ -11,8 +11,6 @@ from .nodes import (
     rag_node,
     reservation_collector_node,
     create_reservation_node,
-    await_approval_node,
-    finalize_reservation_node,
     status_checker_node
 )
 
@@ -48,15 +46,13 @@ def should_continue(state: GraphState) -> str:
 
 
 def create_chatbot_graph():
-    """Create and compile LangGraph with interrupt for admin approval."""
+    """Create and compile LangGraph chatbot."""
     workflow = StateGraph(GraphState)
 
     workflow.add_node("router", router_node)
     workflow.add_node("rag_node", rag_node)
     workflow.add_node("reservation_node", reservation_collector_node)
     workflow.add_node("create_reservation", create_reservation_node)
-    workflow.add_node("await_approval", await_approval_node)
-    workflow.add_node("finalize_reservation", finalize_reservation_node)
     workflow.add_node("status_checker", status_checker_node)
 
     workflow.set_entry_point("router")
@@ -84,19 +80,14 @@ def create_chatbot_graph():
         }
     )
 
-    workflow.add_edge("create_reservation", "await_approval")
-    workflow.add_edge("await_approval", "finalize_reservation")
-    workflow.add_edge("finalize_reservation", END)
+    workflow.add_edge("create_reservation", END)
 
     checkpoint_db = os.path.join(os.path.dirname(__file__), "../../data/checkpoints.sqlite")
 
     conn = sqlite3.connect(checkpoint_db, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
 
-    app = workflow.compile(
-        checkpointer=checkpointer,
-        interrupt_before=["await_approval"]  # Pause here for admin approval
-    )
+    app = workflow.compile(checkpointer=checkpointer)
 
     return app
 

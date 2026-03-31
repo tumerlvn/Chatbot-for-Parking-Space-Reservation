@@ -280,14 +280,50 @@ def reservation_collector_node(state: GraphState) -> GraphState:
 
     current_datetime = datetime.now()
 
+    # Build context about what we already have and what we're asking for
+    already_collected = []
+    currently_asking_for = None
+
+    if reservation_data.get("start_time"):
+        already_collected.append(f"start_time: {reservation_data['start_time']}")
+    else:
+        currently_asking_for = "start_time"
+
+    if reservation_data.get("end_time"):
+        already_collected.append(f"end_time: {reservation_data['end_time']}")
+    elif currently_asking_for is None:
+        currently_asking_for = "end_time"
+
+    if reservation_data.get("name"):
+        already_collected.append(f"name: {reservation_data['name']}")
+    elif currently_asking_for is None:
+        currently_asking_for = "name"
+
+    if reservation_data.get("car_number"):
+        already_collected.append(f"car_number: {reservation_data['car_number']}")
+    elif currently_asking_for is None:
+        currently_asking_for = "car_number"
+
+    if reservation_data.get("preferred_spot_type"):
+        already_collected.append(f"preferred_spot_type: {reservation_data['preferred_spot_type']}")
+    elif currently_asking_for is None:
+        currently_asking_for = "preferred_spot_type"
+
+    already_collected_str = "\n".join(already_collected) if already_collected else "None yet"
+
     extraction_prompt = f"""You are helping collect parking reservation information.
 
-Current reservation data: {reservation_data}
+ALREADY COLLECTED (DO NOT extract these again):
+{already_collected_str}
+
+CURRENTLY ASKING USER FOR: {currently_asking_for}
+
 User's latest message: "{user_input}"
+Current date and time: {current_datetime}
 
-For context todays date and time is: {current_datetime}
+IMPORTANT: Only extract NEW information that is NOT already collected. Do not overwrite existing fields.
 
-Extract the following information if present in the user's message:
+Extract ONLY the following if present in the user's message:
 - name: Full name (first and last)
 - car_number: License plate number
 - start_time: When they want to start parking (date and time)
@@ -304,13 +340,16 @@ preferred_spot_type: [extracted spot type (Standard/EV/Accessible) or "none"]
 
     extraction_response = llm.invoke([HumanMessage(content=extraction_prompt)])
 
+    # Only update fields that aren't already set
     for line in extraction_response.content.split('\n'):
         if ':' in line:
             key, value = line.split(':', 1)
             key = key.strip()
             value = value.strip()
+            # Only store if the field is empty and the value is not "none"
             if value.lower() != "none" and key in ["name", "car_number", "start_time", "end_time", "preferred_spot_type"]:
-                reservation_data[key] = value
+                if not reservation_data.get(key):  # Only set if not already set
+                    reservation_data[key] = value
 
 
     if not reservation_data.get("start_time"):
@@ -465,70 +504,23 @@ def create_reservation_node(state: GraphState) -> GraphState:
         "status": "pending"
     }
 
-    response_text = f""" Pre-reservation created successfully!
+    response_text = f"""Reservation created successfully!
 
- Reservation ID: #{reservation_id}
-  Assigned Spot: {selected_spot["number"]} ({selected_spot["type"]})
- Floor: {selected_spot["floor"]}
+Reservation ID: #{reservation_id}
+Assigned Spot: {selected_spot["number"]} ({selected_spot["type"]})
+Floor: {selected_spot["floor"]}
 
-Your reservation is now pending admin approval.
-You can check the status by asking: "What's the status of my reservation?"
+Your reservation has been submitted and is pending admin approval.
+I'll continue to assist you with any other questions!
+You can check your reservation status anytime by asking: "What's my reservation status?"
 """
 
     return {
         **state,
         "messages": state["messages"] + [AIMessage(content=response_text)],
         "reservation_data": updated_reservation_data,
-        "next_action": "await_approval"
+        "next_action": "wait_for_user"
     }
-
-
-def await_approval_node(state: GraphState) -> GraphState:
-    """Interrupt point where graph pauses for admin approval via API."""
-    reservation_id = state["reservation_data"].get("reservation_id")
-
-    print(f"[INTERRUPT] Awaiting admin approval for reservation #{reservation_id}")
-
-    return state
-
-
-def finalize_reservation_node(state: GraphState) -> GraphState:
-    """Update database with admin decision and mark spot as occupied if approved."""
-    reservation_data = state["reservation_data"]
-    reservation_id = reservation_data.get("reservation_id")
-    status = reservation_data.get("status", "pending")
-
-    if not reservation_id:
-        return state
-
-    db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    try:
-        # Update reservation status in database
-        cursor.execute("""
-            UPDATE reservations
-            SET status = ?
-            WHERE id = ?
-        """, (status, reservation_id))
-
-        # If approved, mark spot as occupied
-        if status == "approved":
-            assigned_spot_id = reservation_data.get("assigned_spot_id")
-            if assigned_spot_id:
-                cursor.execute("""
-                    UPDATE parking_spots
-                    SET status = 'occupied'
-                    WHERE id = ?
-                """, (assigned_spot_id,))
-
-        conn.commit()
-
-    finally:
-        conn.close()
-
-    return state
 
 
 def status_checker_node(state: GraphState) -> GraphState:
