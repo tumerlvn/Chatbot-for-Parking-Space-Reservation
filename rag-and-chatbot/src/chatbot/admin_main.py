@@ -7,8 +7,6 @@ from dotenv import load_dotenv
 
 from langchain_core.messages import HumanMessage
 
-from .admin_graph import create_admin_graph
-from .admin_state import AdminGraphState
 from .orchestrator import create_orchestrator_graph
 from .orchestrator.nodes import get_admin_graph
 
@@ -29,27 +27,28 @@ class AdminAgent:
 
     def chat(self, admin_message: str) -> str:
         """Send message to admin agent and return response."""
-        # Route through orchestrator
+        # Route through orchestrator with checkpoint support
+        config = {"configurable": {"thread_id": self.thread_id}}
+
         result = self.orchestrator.invoke({
             "mode": "admin",
             "admin_state": {
                 "messages": [HumanMessage(content=admin_message)],
                 "intent": None,
                 "action_data": {},
-                "admin_id": self.admin_id,
-                "thread_id": self.thread_id
+                "admin_id": self.admin_id
             },
             "thread_id": self.thread_id,
             "session_id": self.thread_id,
             "events": [],
             "metrics": {},
             "shared_data": {}
-        })
+        }, config=config)
 
-        # Extract result from orchestrator
-        subgraph_result = result.get("result", {})
-        if subgraph_result and subgraph_result.get("messages"):
-            last_message = subgraph_result["messages"][-1]
+        # Extract messages from orchestrator state
+        messages = result.get("messages", [])
+        if messages:
+            last_message = messages[-1]
             return last_message.content if hasattr(last_message, 'content') else str(last_message)
 
         return "No response from admin agent."

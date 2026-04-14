@@ -231,12 +231,11 @@ class DatabaseService:
                 return False
 
             # Update status
-            now = datetime.now().isoformat()
             cursor.execute("""
                 UPDATE reservations
-                SET status = ?, admin_decision_time = ?
+                SET status = ?
                 WHERE id = ?
-            """, (status, now, reservation_id))
+            """, (status, reservation_id))
             conn.commit()
 
         return True

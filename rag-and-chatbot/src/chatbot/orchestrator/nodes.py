@@ -39,33 +39,37 @@ def get_admin_graph():
 
 def supervisor_node(state: OrchestratorState) -> Dict[str, Any]:
     """
-    Supervisor node - routes to appropriate agent subgraph.
+    Supervisor node - routes to appropriate agent subgraph with thread mapping.
 
-    This is the main orchestration logic. It:
-    1. Checks the mode (user/admin)
-    2. Routes to the appropriate subgraph
-    3. Collects metrics
-    4. Returns result
+    Two-level checkpointing:
+    1. Orchestrator maintains conversation history in its checkpoint
+    2. Subgraphs maintain agent-specific state in their checkpoints
+    3. Thread ID mapping ensures separation: "default_thread" → "user_default_thread"
 
     Args:
         state: Current orchestrator state
 
     Returns:
-        Updated state with result from subgraph
+        Updated state with messages, result, events, metrics
     """
     mode = state.get("mode", "user")
     start_time = time.time()
 
     print(f"[Orchestrator] Routing to {mode} agent")
 
+    # Get or create subgraph thread IDs (thread mapping)
+    base_thread_id = state.get("thread_id", "default_thread")
+    user_thread_id = state.get("user_thread_id") or f"user_{base_thread_id}"
+    admin_thread_id = state.get("admin_thread_id") or f"admin_{base_thread_id}"
+
     try:
         if mode == "user":
-            # Route to user agent
+            # Route to user agent with mapped thread ID
             user_graph = get_user_graph()
             user_state = map_to_user_state(state)
 
-            # Configure with thread_id
-            config = {"configurable": {"thread_id": state.get("thread_id", "default_thread")}}
+            # Configure with mapped thread_id for user subgraph
+            config = {"configurable": {"thread_id": user_thread_id}}
 
             # Invoke user subgraph
             result = user_graph.invoke(user_state, config)
@@ -73,22 +77,28 @@ def supervisor_node(state: OrchestratorState) -> Dict[str, Any]:
             # Map result back
             mapped_result = map_from_user_result(result)
 
+            # Collect messages from subgraph
+            subgraph_messages = result.get("messages", [])
+
             # Detect events from result
             events = detect_user_events(result)
 
         elif mode == "admin":
-            # Route to admin agent
+            # Route to admin agent with mapped thread ID
             admin_graph = get_admin_graph()
             admin_state = map_to_admin_state(state)
 
-            # Configure with thread_id
-            config = {"configurable": {"thread_id": state.get("thread_id", "admin_admin1")}}
+            # Configure with mapped thread_id for admin subgraph
+            config = {"configurable": {"thread_id": admin_thread_id}}
 
             # Invoke admin subgraph (may hit interrupt)
             result = admin_graph.invoke(admin_state, config)
 
             # Map result back
             mapped_result = map_from_admin_result(result)
+
+            # Collect messages from subgraph
+            subgraph_messages = result.get("messages", [])
 
             # Detect events from result
             events = detect_admin_events(result)
@@ -105,7 +115,11 @@ def supervisor_node(state: OrchestratorState) -> Dict[str, Any]:
         metrics["last_request_time"] = elapsed_time
         metrics["total_requests"] = metrics.get("total_requests", 0) + 1
 
+        # Return updated state with messages collected from subgraph
         return {
+            "messages": subgraph_messages,  # Orchestrator collects conversation
+            "user_thread_id": user_thread_id,  # Store thread mapping
+            "admin_thread_id": admin_thread_id,
             "result": mapped_result,
             "events": events,
             "metrics": metrics,

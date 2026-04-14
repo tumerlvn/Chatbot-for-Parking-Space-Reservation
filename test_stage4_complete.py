@@ -122,15 +122,14 @@ def test_stage4_complete():
             "user_state": {
                 "messages": [HumanMessage(content="What are your hours?")],
                 "intent": None,
-                "reservation_data": {},
-                "thread_id": "integration_test"
+                "reservation_data": {}
             },
             "thread_id": "integration_test",
             "session_id": "integration",
             "events": [],
             "metrics": {},
             "shared_data": {}
-        })
+        }, config={"configurable": {"thread_id": "integration_test"}})
 
         user_ok = result.get("result") is not None
 
@@ -141,15 +140,14 @@ def test_stage4_complete():
                 "messages": [HumanMessage(content="list")],
                 "intent": None,
                 "action_data": {},
-                "admin_id": "test",
-                "thread_id": "admin_test"
+                "admin_id": "test"
             },
-            "thread_id": "admin_test",
+            "thread_id": "admin_integration",
             "session_id": "integration",
             "events": [],
             "metrics": {},
             "shared_data": {}
-        })
+        }, config={"configurable": {"thread_id": "admin_integration"}})
 
         admin_ok = result.get("result") is not None
 
