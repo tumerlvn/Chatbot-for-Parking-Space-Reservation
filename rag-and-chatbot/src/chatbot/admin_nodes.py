@@ -5,10 +5,11 @@ import sqlite3
 from typing import Dict, Any
 from datetime import datetime
 
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_openai import AzureChatOpenAI
 
 from .admin_state import AdminGraphState
+from .mcp_tools import write_confirmation_tool
 
 
 _llm = None
@@ -17,7 +18,7 @@ def _get_llm():
     """Lazy load LLM."""
     global _llm
     if _llm is None:
-        _llm = AzureChatOpenAI(model_name="gpt-4o-mini-2024-07-18")
+        _llm = AzureChatOpenAI(model_name="gpt-4.1-mini-2025-04-14")
     return _llm
 
 
@@ -272,6 +273,37 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
         conn.commit()
         print(f"[execute_action_node] Commit successful!")
 
+        # NEW: Set flag and details for confirmation node (only for approvals)
+        should_write_confirmation = False
+        reservation_details = {}
+
+        if action_type == "approve":
+            try:
+                # Get reservation details for confirmation node
+                cursor.execute("""
+                    SELECT user_name, car_number, start_time, end_time
+                    FROM reservations
+                    WHERE id = ?
+                """, (reservation_id,))
+                res_data = cursor.fetchone()
+
+                if res_data:
+                    user_name, car_num, start, end = res_data
+                    should_write_confirmation = True
+                    reservation_details = {
+                        "reservation_id": reservation_id,
+                        "name": user_name,
+                        "car_number": car_num,
+                        "start_time": start,
+                        "end_time": end
+                    }
+                    print(f"[execute_action_node] Will route to confirmation node")
+                else:
+                    print(f"[execute_action_node] WARNING: Could not fetch reservation data")
+
+            except Exception as e:
+                print(f"[execute_action_node] WARNING: Failed to fetch reservation details: {e}")
+
         success_text = f"Reservation #{reservation_id} has been {new_status}."
         if admin_notes:
             success_text += f"\nNotes: {admin_notes}"
@@ -280,7 +312,9 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
         return {
             **state,
             "messages": state["messages"] + [AIMessage(content=success_text)],
-            "action_data": {}  # Clear action data
+            "action_data": {},  # Clear action data
+            "should_write_confirmation": should_write_confirmation,
+            "reservation_details": reservation_details
         }
 
     except Exception as e:
@@ -291,3 +325,110 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
     finally:
         conn.close()
         print(f"[execute_action_node] Connection closed")
+
+
+def write_confirmation_node(state: AdminGraphState) -> AdminGraphState:
+    """
+    Write confirmation using LLM with bound tools.
+
+    This node uses bind_tools() pattern to let the LLM call the confirmation tool.
+    """
+    print(f"[write_confirmation_node] Called")
+
+    reservation_details = state.get("reservation_details", {})
+
+    if not reservation_details:
+        print(f"[write_confirmation_node] WARNING: No reservation details, skipping")
+        return state
+
+    # Get LLM and bind the confirmation tool
+    llm = _get_llm()
+    llm_with_tools = llm.bind_tools([write_confirmation_tool])
+
+    # Create a prompt for the LLM to write the confirmation
+    prompt = f"""You are a parking reservation system. You need to write a confirmation for an approved reservation.
+
+Reservation Details:
+- Reservation ID: {reservation_details.get('reservation_id')}
+- User Name: {reservation_details.get('name')}
+- Car Number: {reservation_details.get('car_number')}
+- Start Time: {reservation_details.get('start_time')}
+- End Time: {reservation_details.get('end_time')}
+
+Use the write_confirmation tool to record this confirmation."""
+
+    print(f"[write_confirmation_node] Invoking LLM with bound tools")
+
+    try:
+        # Invoke LLM - it will call the tool
+        result = llm_with_tools.invoke([HumanMessage(content=prompt)])
+
+        print(f"[write_confirmation_node] LLM response: {result}")
+
+        # Check if tool was called
+        if hasattr(result, 'tool_calls') and result.tool_calls:
+            print(f"[write_confirmation_node] Tool calls found: {len(result.tool_calls)}")
+
+            # Execute the tool calls
+            for tool_call in result.tool_calls:
+                tool_name = tool_call.get('name')
+                tool_args = tool_call.get('args', {})
+
+                print(f"[write_confirmation_node] Executing tool: {tool_name}")
+                print(f"[write_confirmation_node] Tool args: {tool_args}")
+
+                if tool_name == "write_confirmation":
+                    tool_result = write_confirmation_tool.invoke(tool_args)
+                    print(f"[write_confirmation_node] Tool result: {tool_result}")
+
+                    # Add tool result to messages
+                    return {
+                        **state,
+                        "messages": state["messages"] + [
+                            result,  # LLM's response with tool call
+                            ToolMessage(
+                                content=str(tool_result),
+                                tool_call_id=tool_call.get('id', 'confirmation'),
+                                name=tool_name
+                            )
+                        ]
+                    }
+        else:
+            print(f"[write_confirmation_node] WARNING: No tool calls in LLM response")
+            print(f"[write_confirmation_node] Response type: {type(result)}")
+            print(f"[write_confirmation_node] Response content: {result.content if hasattr(result, 'content') else result}")
+
+            # Fallback: call tool directly
+            print(f"[write_confirmation_node] Falling back to direct tool invocation")
+            tool_result = write_confirmation_tool.invoke(reservation_details)
+            print(f"[write_confirmation_node] Direct tool result: {tool_result}")
+
+            return {
+                **state,
+                "messages": state["messages"] + [
+                    AIMessage(content=f"Writing confirmation: {tool_result}")
+                ]
+            }
+
+    except Exception as e:
+        print(f"[write_confirmation_node] ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+
+        # Graceful degradation: try direct tool call
+        try:
+            print(f"[write_confirmation_node] Attempting direct tool call")
+            tool_result = write_confirmation_tool.invoke(reservation_details)
+            print(f"[write_confirmation_node] Direct tool result: {tool_result}")
+
+            return {
+                **state,
+                "messages": state["messages"] + [
+                    AIMessage(content=f"Confirmation written: {tool_result}")
+                ]
+            }
+        except Exception as e2:
+            print(f"[write_confirmation_node] ERROR in fallback: {e2}")
+            return state
+
+    return state

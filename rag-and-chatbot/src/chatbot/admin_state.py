@@ -12,6 +12,15 @@ class AdminActionData(TypedDict, total=False):
     completed: Optional[bool]  # Action completed via API
 
 
+class ReservationDetails(TypedDict, total=False):
+    """Reservation details for confirmation writing."""
+    reservation_id: Optional[int]
+    name: Optional[str]
+    car_number: Optional[str]
+    start_time: Optional[str]
+    end_time: Optional[str]
+
+
 class AdminGraphState(TypedDict):
     """State for admin agent conversations."""
     messages: Annotated[List, add_messages]
@@ -19,3 +28,5 @@ class AdminGraphState(TypedDict):
     action_data: AdminActionData
     admin_id: Optional[str]  # Admin identifier
     thread_id: Optional[str]  # Thread ID for API resumption
+    should_write_confirmation: Optional[bool]  # Flag to write confirmation
+    reservation_details: ReservationDetails  # Details for confirmation
