@@ -61,8 +61,8 @@ def _get_llm():
     """Lazy load OpenAI LLM"""
     global _llm
     if _llm is None:
-        # _llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
-        _llm = AzureChatOpenAI(model_name="gpt-4o-mini-2024-07-18")
+        # _llm = ChatOpenAI(model="gpt-4.1-mini-2025-04-14", temperature=0.7)
+        _llm = AzureChatOpenAI(model_name="gpt-4.1-mini-2025-04-14")
     return _llm
 
 

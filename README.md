@@ -2,7 +2,7 @@
 
 An intelligent conversational AI system for parking facility management using RAG (Retrieval-Augmented Generation) and LangGraph.
 
-**Current Status:** Stage 2 Complete (Two-Agent Architecture with Human-in-the-Loop Admin Approval)
+**Current Status:** Stage 3 Complete (Confirmation File Writer with LangGraph bind_tools Pattern)
 
 ---
 
@@ -84,12 +84,16 @@ User Input → Router → [Q&A | Reservation | Status] → Response
                                               ↓
                                         User continues chatting
 
-ADMIN AGENT (With Interrupt):
+ADMIN AGENT (With Interrupt + Confirmation):
 Admin Input → Router → [List Pending | Approve/Reject]
                               ↓              ↓
                          Shows list    [INTERRUPT] → REST API confirms
                                               ↓
                                        Execute action → Update DB
+                                              ↓ (if approved)
+                                   Write confirmation node (LLM + bind_tools)
+                                              ↓
+                                       Confirmation file written
 ```
 
 **Key Technologies:**
@@ -99,10 +103,10 @@ Admin Input → Router → [List Pending | Approve/Reject]
 - **SQLite** - Shared database for coordination between agents
 - **SqliteSaver** - Separate checkpoint storage for each agent
 - **FastAPI** - REST API to resume admin agent after confirmation
-- **Azure OpenAI** - Language understanding and generation (GPT-4o-mini)
+- **Azure OpenAI** - Language understanding and generation (gpt-5.1)
 - **HuggingFace** - Embeddings (all-MiniLM-L6-v2) and reranking (bge-reranker-base)
 
-**Stage 2 Two-Agent Flow:**
+**Stage 2-3 Two-Agent Flow:**
 
 1. User completes reservation details in User Agent
 2. User Agent creates pending reservation in database and continues conversation
@@ -110,8 +114,10 @@ Admin Input → Router → [List Pending | Approve/Reject]
 4. Admin types "approve ID" - Admin Agent pauses at interrupt
 5. Admin runs curl command to REST API
 6. API resumes Admin Agent graph, updates database, marks spot as occupied
-7. Admin Agent automatically shows completion message
-8. User can check status via User Agent chatbot
+7. **Stage 3:** Graph routes to write_confirmation_node (LLM with bind_tools)
+8. **Stage 3:** Confirmation written to file with audit trail
+9. Admin Agent automatically shows completion message
+10. User can check status via User Agent chatbot
 
 ---
 
@@ -163,7 +169,9 @@ python rag-and-chatbot/src/chatbot/verify_setup.py
 **Option 1: Command Line Interface**
 
 ```bash
-python -m rag_and_chatbot.src.chatbot.main
+cd rag-and-chatbot
+source ../.venv/bin/activate
+python -m src.chatbot.main
 ```
 
 Commands:
@@ -185,9 +193,9 @@ print(response)
 
 ### Run the Admin System (Stage 2)
 
-Stage 2 provides two ways for administrators to manage reservations:
+Stage 2 provides a way for administrators to manage reservations:
 
-**Option 1: Admin CLI (Recommended)**
+**Terminal 1: Admin CLI (Recommended)**
 
 Interactive conversational interface for admins:
 
@@ -207,7 +215,7 @@ Commands:
 
 The CLI automatically polls for completion after triggering an approval/rejection.
 
-**Option 2: REST API**
+**Terminal 2: REST API**
 
 Start the API server for programmatic access:
 
@@ -222,6 +230,8 @@ The API will be available at:
 - Server: http://localhost:8000
 - Interactive docs: http://localhost:8000/docs
 - OpenAPI schema: http://localhost:8000/openapi.json
+
+To discrover more go to STAGE2_QUICKSTART.md
 
 **Available Endpoints:**
 
@@ -330,6 +340,7 @@ rag-and-chatbot/
 │   ├── parking.db              # Vector database (policy knowledge)
 │   ├── parking_db.sqlite       # SQL database (reservations & spots)
 │   ├── checkpoints.sqlite      # LangGraph state persistence
+│   ├── confirmed_reservations.txt  # Stage 3: Confirmation file (auto-created)
 │   └── parking_policy.md       # Source policy document
 │
 ├── src/
@@ -338,12 +349,16 @@ rag-and-chatbot/
 │   │   ├── nodes.py            # User agent nodes (router, Q&A, reservation, status)
 │   │   ├── graph.py            # User agent graph (no interrupt)
 │   │   ├── main.py             # User agent CLI entry point
-│   │   ├── admin_state.py      # Admin agent conversation state (NEW)
-│   │   ├── admin_nodes.py      # Admin agent nodes (list, approve, reject) (NEW)
-│   │   ├── admin_graph.py      # Admin agent graph (with interrupt) (NEW)
-│   │   ├── admin_main.py       # Admin agent CLI with polling (NEW)
+│   │   ├── admin_state.py      # Admin agent conversation state
+│   │   ├── admin_nodes.py      # Admin agent nodes (with write_confirmation_node)
+│   │   ├── admin_graph.py      # Admin agent graph (with conditional routing)
+│   │   ├── admin_main.py       # Admin agent CLI with polling
+│   │   ├── mcp_tools.py        # Stage 3: LangChain tools for confirmation
 │   │   ├── guardrails.py       # Data protection & security
 │   │   └── evaluation.py       # RAG performance metrics
+│   │
+│   ├── mcp/                    # Stage 3: Confirmation writer module
+│   │   └── confirmation_writer.py  # File writer with sanitization
 │   │
 │   ├── api/                    # Stage 2: Admin REST API
 │   │   └── admin_api.py        # FastAPI server for resuming admin agent
@@ -394,6 +409,27 @@ rag-and-chatbot/
 | **Admin Decision Tracking**     | Records approval time and admin notes in database                    |
 | **Spot Occupancy Management**   | Updates spot status to "occupied" on approval                        |
 | **Detailed API Logging**        | Logs graph execution and database updates for debugging              |
+
+### Stage 3: Confirmation File Writer with LangGraph bind_tools
+
+| Feature                         | Description                                                          |
+| ------------------------------- | -------------------------------------------------------------------- |
+| **Separate Confirmation Node**  | Dedicated graph node for writing confirmations (not mixed with DB)   |
+| **LLM with bind_tools Pattern** | Uses proper LangGraph `.bind_tools()` for tool calling               |
+| **Conditional Routing**         | Routes to confirmation node only for approvals, not rejections       |
+| **File-Based Audit Trail**      | Writes approved reservations to pipe-delimited text file             |
+| **Input Sanitization**          | Prevents file format corruption from special characters              |
+| **Graceful Degradation**        | Approval succeeds even if file writing fails                         |
+| **Tool Message History**        | Proper ToolMessage records in conversation state                     |
+| **Extensible Architecture**     | Easy to add more tools (email, audit logs, notifications)            |
+
+**File Format:**
+```
+Name | Car Number | Period | Approval Time | Reservation ID
+John Smith | ABC-1234 | 2026-04-03 09:00:00 to 2026-04-03 17:00:00 | 2026-04-02 14:35:22 | Res#1
+```
+
+For detailed Stage 3 architecture and implementation details, see [STAGE3_BIND_TOOLS_UPDATE.md](./rag-and-chatbot/STAGE3_BIND_TOOLS_UPDATE.md)
 
 ### Security & Data Protection
 
@@ -462,6 +498,12 @@ jupyter notebook rag-and-chatbot/src/notebooks/test_chatbot.ipynb
 
 # Test Stage 2 integration (human-in-the-loop flow)
 jupyter notebook rag-and-chatbot/src/notebooks/test_stage2.ipynb
+
+# Test Stage 3 confirmation writer (unit tests)
+cd rag-and-chatbot && python test_mcp_server.py
+
+# Test Stage 3 integration (end-to-end with bind_tools)
+cd rag-and-chatbot && python test_stage3_integration.py
 
 # Test guard rails (security & PII protection)
 jupyter notebook rag-and-chatbot/src/notebooks/test_guardrails.ipynb
@@ -534,6 +576,8 @@ jupyter notebook rag-and-chatbot/src/notebooks/generate_data.ipynb
 - **[PHASE1.md](./PHASE1.md)** - Stage 1 technical documentation
 - **[STAGE1_COMPLETE.md](./STAGE1_COMPLETE.md)** - Stage 1 completion summary
 - **[STAGE2_QUICKSTART.md](./STAGE2_QUICKSTART.md)** - Stage 2 quick start guide
+- **[STAGE3_BIND_TOOLS_UPDATE.md](./rag-and-chatbot/STAGE3_BIND_TOOLS_UPDATE.md)** - Stage 3 architecture and bind_tools pattern
+- **[STAGE3_README.md](./rag-and-chatbot/STAGE3_README.md)** - Stage 3 detailed implementation guide
 - **[PROJECT_SCHEMA.md](./PROJECT_SCHEMA.md)** - Complete architecture overview
 - **API Documentation** - Interactive docs at http://localhost:8000/docs (when API server is running)
 - **Inline Code Comments** - Throughout all Python files
@@ -567,3 +611,12 @@ jupyter notebook rag-and-chatbot/src/notebooks/generate_data.ipynb
 - Polls graph state every 2 seconds for new messages
 - Automatically displays completion message when API resumes graph
 - 120-second timeout with clear error messages
+
+**LangGraph bind_tools Pattern (Stage 3):**
+
+- Separate graph node dedicated to confirmation writing
+- Uses `.bind_tools()` to bind confirmation tool to LLM
+- LLM decides when to call the tool based on prompt
+- Proper ToolMessage records in conversation history
+- Conditional routing: approvals → confirmation node, rejections → END
+- Clean separation: execute_action_node handles DB, write_confirmation_node handles file

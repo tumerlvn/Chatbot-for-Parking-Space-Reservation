@@ -10,7 +10,8 @@ from .admin_nodes import (
     admin_router_node,
     list_pending_node,
     initiate_action_node,
-    execute_action_node
+    execute_action_node,
+    write_confirmation_node
 )
 
 
@@ -26,6 +27,18 @@ def route_admin_intent(state: AdminGraphState) -> str:
         return "list_pending"  # Default
 
 
+def route_after_execute(state: AdminGraphState) -> str:
+    """Route after execute_action: write confirmation if approved, else end."""
+    should_write = state.get("should_write_confirmation", False)
+
+    if should_write:
+        print("[route_after_execute] Routing to write_confirmation")
+        return "write_confirmation"
+    else:
+        print("[route_after_execute] Routing to END")
+        return "end"
+
+
 def create_admin_graph():
     """Create admin agent graph with interrupt at initiate_action."""
     workflow = StateGraph(AdminGraphState)
@@ -35,6 +48,7 @@ def create_admin_graph():
     workflow.add_node("list_pending", list_pending_node)
     workflow.add_node("initiate_action", initiate_action_node)
     workflow.add_node("execute_action", execute_action_node)
+    workflow.add_node("write_confirmation", write_confirmation_node)
 
     # Entry point
     workflow.set_entry_point("router")
@@ -54,7 +68,19 @@ def create_admin_graph():
 
     # initiate_action -> execute_action (after interrupt)
     workflow.add_edge("initiate_action", "execute_action")
-    workflow.add_edge("execute_action", END)
+
+    # execute_action -> conditional: write_confirmation or END
+    workflow.add_conditional_edges(
+        "execute_action",
+        route_after_execute,
+        {
+            "write_confirmation": "write_confirmation",
+            "end": END
+        }
+    )
+
+    # write_confirmation -> END
+    workflow.add_edge("write_confirmation", END)
 
     # Checkpointer for admin conversations
     checkpoint_db = os.path.join(os.path.dirname(__file__), "../../data/admin_checkpoints.sqlite")
