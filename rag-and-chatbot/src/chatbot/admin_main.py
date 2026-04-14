@@ -9,6 +9,8 @@ from langchain_core.messages import HumanMessage
 
 from .admin_graph import create_admin_graph
 from .admin_state import AdminGraphState
+from .orchestrator import create_orchestrator_graph
+from .orchestrator.nodes import get_admin_graph
 
 load_dotenv()
 
@@ -18,28 +20,36 @@ class AdminAgent:
 
     def __init__(self, admin_id: str = "admin1"):
         print("Initializing Admin Agent...")
-        self.app = create_admin_graph()
+        self.orchestrator = create_orchestrator_graph()
         self.admin_id = admin_id
         self.thread_id = f"admin_{admin_id}"
+        # Keep reference to admin graph for get_state
+        self.app = get_admin_graph()
         print("Admin Agent ready.")
 
     def chat(self, admin_message: str) -> str:
         """Send message to admin agent and return response."""
-        config = {"configurable": {"thread_id": self.thread_id}}
-
-        result = self.app.invoke(
-            {
+        # Route through orchestrator
+        result = self.orchestrator.invoke({
+            "mode": "admin",
+            "admin_state": {
                 "messages": [HumanMessage(content=admin_message)],
                 "intent": None,
                 "action_data": {},
                 "admin_id": self.admin_id,
                 "thread_id": self.thread_id
             },
-            config=config
-        )
+            "thread_id": self.thread_id,
+            "session_id": self.thread_id,
+            "events": [],
+            "metrics": {},
+            "shared_data": {}
+        })
 
-        if result["messages"]:
-            last_message = result["messages"][-1]
+        # Extract result from orchestrator
+        subgraph_result = result.get("result", {})
+        if subgraph_result and subgraph_result.get("messages"):
+            last_message = subgraph_result["messages"][-1]
             return last_message.content if hasattr(last_message, 'content') else str(last_message)
 
         return "No response from admin agent."

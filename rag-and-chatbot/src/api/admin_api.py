@@ -11,7 +11,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from chatbot.admin_graph import create_admin_graph
+from src.chatbot.admin_graph import create_admin_graph
+from src.chatbot.orchestrator.nodes import get_admin_graph
 
 
 app = FastAPI(
@@ -20,7 +21,8 @@ app = FastAPI(
     version="2.0.0"
 )
 
-admin_agent_graph = create_admin_graph()
+# Use the singleton admin graph from orchestrator (maintains same checkpoint state)
+admin_agent_graph = get_admin_graph()
 
 
 @contextmanager
