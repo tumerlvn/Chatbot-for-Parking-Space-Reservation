@@ -1,12 +1,10 @@
 """Node functions for LangGraph chatbot."""
 
 import os
-import sqlite3
 from typing import Dict, Any
 from datetime import datetime
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langchain_milvus import Milvus
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_classic.retrievers import ContextualCompressionRetriever
@@ -16,11 +14,13 @@ from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from .state import GraphState
 from .guardrails import apply_guardrails, validate_query
 
+# Import shared services (use relative import to avoid path issues)
+from ..shared import db_service, get_llm
+
 
 
 _vector_store = None
 _compression_retriever = None
-_llm = None
 
 
 def _get_vector_store():
@@ -58,12 +58,8 @@ def _get_compression_retriever():
 
 
 def _get_llm():
-    """Lazy load OpenAI LLM"""
-    global _llm
-    if _llm is None:
-        # _llm = ChatOpenAI(model="gpt-4.1-mini-2025-04-14", temperature=0.7)
-        _llm = AzureChatOpenAI(model_name="gpt-4.1-mini-2025-04-14")
-    return _llm
+    """Lazy load LLM from shared pool"""
+    return get_llm()
 
 
 
@@ -169,19 +165,18 @@ Respond with ONLY "yes" or "no"."""
 
     realtime_data = ""
     if is_availability_query:
-        db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        # Use shared database service
+        with db_service.get_connection() as conn:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-            SELECT spot_type, COUNT(*) as available_count
-            FROM parking_spots
-            WHERE status = 'available'
-            GROUP BY spot_type
-        """)
+            cursor.execute("""
+                SELECT spot_type, COUNT(*) as available_count
+                FROM parking_spots
+                WHERE status = 'available'
+                GROUP BY spot_type
+            """)
 
-        availability = cursor.fetchall()
-        conn.close()
+            availability = cursor.fetchall()
 
         if availability:
             realtime_data = "\n\nCurrent Real-Time Availability:\n"
@@ -218,54 +213,31 @@ If the information is not in the context, say so politely.
 
 def _check_parking_availability(start_time: str, end_time: str) -> Dict[str, Any]:
     """Check spot availability excluding time conflicts with existing reservations."""
-    db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    # Use shared database service
+    result = db_service.check_availability(start_time, end_time)
 
-    cursor.execute("""
-        SELECT
-            ps.id,
-            ps.spot_number,
-            ps.spot_type,
-            ps.floor,
-            ps.price_per_hour
-        FROM parking_spots ps
-        WHERE ps.status = 'available'
-        AND ps.id NOT IN (
-            SELECT spot_id
-            FROM reservations
-            WHERE status != 'cancelled'
-            AND (
-                (start_time <= ? AND end_time >= ?)
-                OR (start_time <= ? AND end_time >= ?)
-                OR (start_time >= ? AND end_time <= ?)
-            )
-        )
-        ORDER BY ps.spot_type, ps.floor
-    """, (end_time, start_time, end_time, end_time, start_time, end_time))
-
-    available_spots = cursor.fetchall()
-    conn.close()
-
-    count_by_type = {}
+    # Get price information for each spot (db_service doesn't include this yet)
     spots_list = []
+    with db_service.get_connection() as conn:
+        cursor = conn.cursor()
+        for spot in result["available_spots"]:
+            cursor.execute("SELECT price_per_hour FROM parking_spots WHERE id = ?", (spot["id"],))
+            row = cursor.fetchone()
+            price = row[0] if row else 0
 
-    for spot in available_spots:
-        spot_id, spot_number, spot_type, floor, price = spot
-        spots_list.append({
-            "id": spot_id,
-            "number": spot_number,
-            "type": spot_type,
-            "floor": floor,
-            "price": price
-        })
-        count_by_type[spot_type] = count_by_type.get(spot_type, 0) + 1
+            spots_list.append({
+                "id": spot["id"],
+                "number": spot["spot_number"],
+                "type": spot["spot_type"],
+                "floor": spot["floor"],
+                "price": price
+            })
 
     return {
-        "available": len(available_spots) > 0,
+        "available": len(spots_list) > 0,
         "spots": spots_list,
-        "count_by_type": count_by_type,
-        "total_count": len(available_spots)
+        "count_by_type": result["count_by_type"],
+        "total_count": len(spots_list)
     }
 
 
@@ -471,31 +443,16 @@ def create_reservation_node(state: GraphState) -> GraphState:
             "next_action": "wait_for_user"
         }
 
-    db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
+    # Use shared database service to create reservation
     thread_id = state.get("thread_id")
-
-    try:
-        cursor.execute("""
-            INSERT INTO reservations
-            (spot_id, user_name, car_number, start_time, end_time, status, thread_id)
-            VALUES (?, ?, ?, ?, ?, 'pending', ?)
-        """, (
-            selected_spot["id"],
-            reservation_data["name"],
-            reservation_data["car_number"],
-            reservation_data["start_time"],
-            reservation_data["end_time"],
-            thread_id
-        ))
-        conn.commit()
-
-        reservation_id = cursor.lastrowid
-
-    finally:
-        conn.close()
+    reservation_id = db_service.create_reservation({
+        "spot_id": selected_spot["id"],
+        "name": reservation_data["name"],
+        "car_number": reservation_data["car_number"],
+        "start_time": reservation_data["start_time"],
+        "end_time": reservation_data["end_time"],
+        "thread_id": thread_id
+    })
 
     updated_reservation_data = {
         **reservation_data,
@@ -561,11 +518,10 @@ Could you provide your name or license plate number so I can look up your reserv
 For example: "Check status for John Smith" or "My plate is ABC-1234"
 """
     else:
-        db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        # Use shared database service
+        with db_service.get_connection() as conn:
+            cursor = conn.cursor()
 
-        try:
             # Find most recent reservation for this user
             cursor.execute("""
                 SELECT
@@ -585,9 +541,6 @@ For example: "Check status for John Smith" or "My plate is ABC-1234"
             """, (name or "", car_number or ""))
 
             result = cursor.fetchone()
-
-        finally:
-            conn.close()
 
         if not result:
             response_text = f"""I couldn't find any reservations for {name or car_number}.

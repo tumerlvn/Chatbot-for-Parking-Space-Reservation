@@ -1,25 +1,21 @@
 """Admin agent nodes for reservation approval workflow."""
 
 import os
-import sqlite3
 from typing import Dict, Any
 from datetime import datetime
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
-from langchain_openai import AzureChatOpenAI
 
 from .admin_state import AdminGraphState
 from .mcp_tools import write_confirmation_tool
 
+# Import shared services (use relative import to avoid path issues)
+from ..shared import db_service, get_llm
 
-_llm = None
 
 def _get_llm():
-    """Lazy load LLM."""
-    global _llm
-    if _llm is None:
-        _llm = AzureChatOpenAI(model_name="gpt-4.1-mini-2025-04-14")
-    return _llm
+    """Lazy load LLM from shared pool."""
+    return get_llm()
 
 
 def admin_router_node(state: AdminGraphState) -> AdminGraphState:
@@ -64,44 +60,19 @@ Respond with ONLY one word: "list_pending", "approve", "reject", or "query"
 
 def list_pending_node(state: AdminGraphState) -> AdminGraphState:
     """List all pending reservations."""
-    db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    try:
-        cursor.execute("""
-            SELECT
-                r.id,
-                r.user_name,
-                r.car_number,
-                r.start_time,
-                r.end_time,
-                r.reservation_time,
-                ps.spot_number,
-                ps.spot_type,
-                ps.floor
-            FROM reservations r
-            JOIN parking_spots ps ON r.spot_id = ps.id
-            WHERE r.status = 'pending'
-            ORDER BY r.reservation_time ASC
-        """)
-
-        results = cursor.fetchall()
-
-    finally:
-        conn.close()
+    # Use shared database service
+    results = db_service.list_pending_reservations()
 
     if not results:
         response_text = "No pending reservations at this time."
     else:
         response_text = f"Pending Reservations ({len(results)}):\n\n"
-        for row in results:
-            res_id, name, car, start, end, req_time, spot, spot_type, floor = row
-            response_text += f"ID #{res_id}\n"
-            response_text += f"  User: {name} | Car: {car}\n"
-            response_text += f"  Time: {start} to {end}\n"
-            response_text += f"  Spot: {spot} ({spot_type}, {floor})\n"
-            response_text += f"  Requested: {req_time}\n\n"
+        for reservation in results:
+            response_text += f"ID #{reservation['id']}\n"
+            response_text += f"  User: {reservation['user_name']} | Car: {reservation['car_number']}\n"
+            response_text += f"  Time: {reservation['start_time']} to {reservation['end_time']}\n"
+            response_text += f"  Spot: {reservation['spot_number']} ({reservation['spot_type']}, {reservation['floor']})\n"
+            response_text += f"  Requested: {reservation['reservation_time']}\n\n"
 
         response_text += "To approve/reject, say: 'Approve #ID' or 'Reject #ID'"
 
@@ -141,29 +112,18 @@ Respond with ONLY the number, or "none" if no number found.
         }
 
     # Verify reservation exists and is pending
-    db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    reservation = db_service.get_reservation(reservation_id)
 
-    try:
-        cursor.execute("""
-            SELECT id, user_name, car_number, status
-            FROM reservations
-            WHERE id = ?
-        """, (reservation_id,))
-
-        result = cursor.fetchone()
-    finally:
-        conn.close()
-
-    if not result:
+    if not reservation:
         error_text = f"Reservation #{reservation_id} not found."
         return {
             **state,
             "messages": state["messages"] + [AIMessage(content=error_text)]
         }
 
-    res_id, name, car, status = result
+    name = reservation["user_name"]
+    car = reservation["car_number"]
+    status = reservation["status"]
 
     if status != "pending":
         error_text = f"Reservation #{reservation_id} is already {status}."
@@ -226,105 +186,78 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
 
     print(f"[execute_action_node] Executing {action_type} for reservation #{reservation_id}")
 
-    # Update database
-    db_path = os.path.join(os.path.dirname(__file__), "../../data/parking_db.sqlite")
-    print(f"[execute_action_node] Database path: {db_path}")
+    # Update database using shared service
+    new_status = "approved" if action_type == "approve" else "rejected"
+    print(f"[execute_action_node] Updating reservation {reservation_id} to status: {new_status}")
 
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    admin_id = state.get("admin_id")
+    success = db_service.update_reservation_status(reservation_id, new_status, admin_id)
 
-    try:
-        # Update reservation status
-        new_status = "approved" if action_type == "approve" else "rejected"
-        print(f"[execute_action_node] Updating reservation {reservation_id} to status: {new_status}")
+    if not success:
+        print(f"[execute_action_node] ERROR: Failed to update reservation {reservation_id}")
+        return {
+            **state,
+            "messages": state["messages"] + [AIMessage(content=f"Error: Failed to update reservation #{reservation_id}")]
+        }
 
-        cursor.execute("""
-            UPDATE reservations
-            SET status = ?
-            WHERE id = ?
-        """, (new_status, reservation_id))
+    # If approved, mark spot as occupied
+    if action_type == "approve":
+        reservation = db_service.get_reservation(reservation_id)
+        if reservation:
+            spot_id = reservation["spot_id"]
+            print(f"[execute_action_node] Marking spot {spot_id} as occupied")
 
-        rows_affected = cursor.rowcount
-        print(f"[execute_action_node] UPDATE reservations affected {rows_affected} rows")
-
-        # If approved, mark spot as occupied
-        if action_type == "approve":
-            cursor.execute("""
-                SELECT spot_id FROM reservations WHERE id = ?
-            """, (reservation_id,))
-            spot_result = cursor.fetchone()
-
-            if spot_result:
-                spot_id = spot_result[0]
-                print(f"[execute_action_node] Marking spot {spot_id} as occupied")
-
+            with db_service.get_connection() as conn:
+                cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE parking_spots
                     SET status = 'occupied'
                     WHERE id = ?
                 """, (spot_id,))
+                conn.commit()
+                print(f"[execute_action_node] Spot marked as occupied")
+        else:
+            print(f"[execute_action_node] WARNING: Could not find reservation {reservation_id}")
 
-                spot_rows_affected = cursor.rowcount
-                print(f"[execute_action_node] UPDATE parking_spots affected {spot_rows_affected} rows")
+    print(f"[execute_action_node] Update successful!")
+
+    # NEW: Set flag and details for confirmation node (only for approvals)
+    should_write_confirmation = False
+    reservation_details = {}
+
+    if action_type == "approve":
+        try:
+            # Get reservation details using shared service
+            reservation = db_service.get_reservation(reservation_id)
+
+            if reservation:
+                should_write_confirmation = True
+                reservation_details = {
+                    "reservation_id": reservation_id,
+                    "name": reservation["user_name"],
+                    "car_number": reservation["car_number"],
+                    "start_time": reservation["start_time"],
+                    "end_time": reservation["end_time"]
+                }
+                print(f"[execute_action_node] Will route to confirmation node")
             else:
-                print(f"[execute_action_node] WARNING: No spot_id found for reservation {reservation_id}")
+                print(f"[execute_action_node] WARNING: Could not fetch reservation data")
 
-        print(f"[execute_action_node] Committing changes...")
-        conn.commit()
-        print(f"[execute_action_node] Commit successful!")
+        except Exception as e:
+            print(f"[execute_action_node] WARNING: Failed to fetch reservation details: {e}")
 
-        # NEW: Set flag and details for confirmation node (only for approvals)
-        should_write_confirmation = False
-        reservation_details = {}
+    success_text = f"Reservation #{reservation_id} has been {new_status}."
+    if admin_notes:
+        success_text += f"\nNotes: {admin_notes}"
 
-        if action_type == "approve":
-            try:
-                # Get reservation details for confirmation node
-                cursor.execute("""
-                    SELECT user_name, car_number, start_time, end_time
-                    FROM reservations
-                    WHERE id = ?
-                """, (reservation_id,))
-                res_data = cursor.fetchone()
-
-                if res_data:
-                    user_name, car_num, start, end = res_data
-                    should_write_confirmation = True
-                    reservation_details = {
-                        "reservation_id": reservation_id,
-                        "name": user_name,
-                        "car_number": car_num,
-                        "start_time": start,
-                        "end_time": end
-                    }
-                    print(f"[execute_action_node] Will route to confirmation node")
-                else:
-                    print(f"[execute_action_node] WARNING: Could not fetch reservation data")
-
-            except Exception as e:
-                print(f"[execute_action_node] WARNING: Failed to fetch reservation details: {e}")
-
-        success_text = f"Reservation #{reservation_id} has been {new_status}."
-        if admin_notes:
-            success_text += f"\nNotes: {admin_notes}"
-
-        print(f"[execute_action_node] Returning success message")
-        return {
-            **state,
-            "messages": state["messages"] + [AIMessage(content=success_text)],
-            "action_data": {},  # Clear action data
-            "should_write_confirmation": should_write_confirmation,
-            "reservation_details": reservation_details
-        }
-
-    except Exception as e:
-        print(f"[execute_action_node] ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
-    finally:
-        conn.close()
-        print(f"[execute_action_node] Connection closed")
+    print(f"[execute_action_node] Returning success message")
+    return {
+        **state,
+        "messages": state["messages"] + [AIMessage(content=success_text)],
+        "action_data": {},  # Clear action data
+        "should_write_confirmation": should_write_confirmation,
+        "reservation_details": reservation_details
+    }
 
 
 def write_confirmation_node(state: AdminGraphState) -> AdminGraphState:

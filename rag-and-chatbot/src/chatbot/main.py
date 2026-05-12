@@ -6,8 +6,7 @@ from dotenv import load_dotenv
 
 from langchain_core.messages import HumanMessage
 
-from .graph import create_chatbot_graph
-from .state import GraphState
+from .orchestrator import create_orchestrator_graph
 
 load_dotenv()
 
@@ -17,40 +16,55 @@ class ParkingChatbot:
 
     def __init__(self):
         print("Initializing Parking Reservation Chatbot...")
-        self.app = create_chatbot_graph()
+        self.orchestrator = create_orchestrator_graph()
         self.thread_id = "default_thread"
         print("Chatbot ready.")
 
     def chat(self, user_message: str) -> str:
         """Send message to chatbot and return response."""
+        # Route through orchestrator with checkpoint support
         config = {"configurable": {"thread_id": self.thread_id}}
 
-        result = self.app.invoke(
-            {
+        result = self.orchestrator.invoke({
+            "mode": "user",
+            "user_state": {
                 "messages": [HumanMessage(content=user_message)],
                 "intent": None,
-                "next_action": None,
-                "thread_id": self.thread_id
+                "next_action": None
             },
-            config=config
-        )
+            "thread_id": self.thread_id,
+            "session_id": self.thread_id,
+            "events": [],
+            "metrics": {},
+            "shared_data": {}
+        }, config=config)
 
-        if result["messages"]:
-            last_message = result["messages"][-1]
+        # Extract messages from orchestrator state
+        messages = result.get("messages", [])
+        if messages:
+            last_message = messages[-1]
             return last_message.content if hasattr(last_message, 'content') else str(last_message)
 
         return "I'm sorry, I didn't understand that. Could you please rephrase?"
 
     def stream_chat(self, user_message: str):
         """Stream chatbot response for real-time display."""
+        # Stream through orchestrator (now has checkpointer)
         config = {"configurable": {"thread_id": self.thread_id}}
 
-        for event in self.app.stream(
+        for event in self.orchestrator.stream(
             {
-                "messages": [HumanMessage(content=user_message)],
-                "intent": None,
-                "next_action": None,
-                "thread_id": self.thread_id
+                "mode": "user",
+                "user_state": {
+                    "messages": [HumanMessage(content=user_message)],
+                    "intent": None,
+                    "next_action": None
+                },
+                "thread_id": self.thread_id,
+                "session_id": self.thread_id,
+                "events": [],
+                "metrics": {},
+                "shared_data": {}
             },
             config=config
         ):
@@ -62,8 +76,9 @@ class ParkingChatbot:
 
     def get_conversation_history(self) -> list:
         """Return full conversation history."""
+        # Get history from orchestrator checkpoint
         config = {"configurable": {"thread_id": self.thread_id}}
-        state = self.app.get_state(config)
+        state = self.orchestrator.get_state(config)
         return state.values.get("messages", []) if state.values else []
 
     def reset(self):
