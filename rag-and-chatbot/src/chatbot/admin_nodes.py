@@ -314,24 +314,21 @@ def write_confirmation_node(state: AdminGraphState) -> AdminGraphState:
         return state
 
     # Get LLM and bind the confirmation tool
+    import logging
+    logger = logging.getLogger(__name__)
+
     try:
         llm = _get_llm()
         llm_with_tools = llm.bind_tools([write_confirmation_tool])
     except Exception as e:
+        logger.error(f"Failed to initialize LLM in write_confirmation_node: {e}")
         print(f"[write_confirmation_node] ERROR: Failed to initialize LLM: {e}")
-        # Fallback to direct tool call
-        try:
-            tool_result = write_confirmation_tool.invoke(reservation_details)
-            print(f"[write_confirmation_node] Direct tool result (LLM init failed): {tool_result}")
-            return {
-                **state,
-                "messages": state["messages"] + [
-                    AIMessage(content=f"Confirmation written (direct): {tool_result}")
-                ]
-            }
-        except Exception as e2:
-            print(f"[write_confirmation_node] ERROR in fallback tool call: {e2}")
-            return state
+        return {
+            **state,
+            "messages": state["messages"] + [
+                AIMessage(content="Error: Failed to initialize AI service for confirmation writing.")
+            ]
+        }
 
     # Create a prompt for the LLM to write the confirmation
     prompt = f"""You are a parking reservation system. You need to write a confirmation for an approved reservation.
@@ -382,41 +379,28 @@ Use the write_confirmation tool to record this confirmation."""
                         ]
                     }
         else:
+            # LLM did not produce a tool call - log warning and return error state
+            logger.warning(f"LLM did not produce tool call in write_confirmation_node. Response type: {type(result)}")
             print(f"[write_confirmation_node] WARNING: No tool calls in LLM response")
             print(f"[write_confirmation_node] Response type: {type(result)}")
             print(f"[write_confirmation_node] Response content: {result.content if hasattr(result, 'content') else result}")
 
-            # Fallback: call tool directly
-            print(f"[write_confirmation_node] Falling back to direct tool invocation")
-            tool_result = write_confirmation_tool.invoke(reservation_details)
-            print(f"[write_confirmation_node] Direct tool result: {tool_result}")
-
             return {
                 **state,
                 "messages": state["messages"] + [
-                    AIMessage(content=f"Writing confirmation: {tool_result}")
+                    AIMessage(content="Error: Failed to generate confirmation properly. Please contact support.")
                 ]
             }
 
     except Exception as e:
+        logger.error(f"LLM invocation failed in write_confirmation_node: {e}", exc_info=True)
         print(f"[write_confirmation_node] ERROR: {e}")
-        import traceback
-        traceback.print_exc()
 
-        # Graceful degradation: try direct tool call
-        try:
-            print(f"[write_confirmation_node] Attempting direct tool call")
-            tool_result = write_confirmation_tool.invoke(reservation_details)
-            print(f"[write_confirmation_node] Direct tool result: {tool_result}")
-
-            return {
-                **state,
-                "messages": state["messages"] + [
-                    AIMessage(content=f"Confirmation written: {tool_result}")
-                ]
-            }
-        except Exception as e2:
-            print(f"[write_confirmation_node] ERROR in fallback: {e2}")
-            return state
+        return {
+            **state,
+            "messages": state["messages"] + [
+                AIMessage(content="Error: Failed to write confirmation. Please contact support.")
+            ]
+        }
 
     return state

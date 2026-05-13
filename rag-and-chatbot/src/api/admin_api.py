@@ -8,7 +8,8 @@ from datetime import datetime
 from typing import Literal, Optional
 from contextlib import contextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Security, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,44 @@ app = FastAPI(
 
 # Use the singleton admin graph from orchestrator (maintains same checkpoint state)
 admin_agent_graph = get_admin_graph()
+
+# Security setup
+security = HTTPBearer()
+
+# Load admin API token from environment
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")
+
+if not ADMIN_API_TOKEN:
+    logger.warning("ADMIN_API_TOKEN not set in environment. API authentication disabled!")
+
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)) -> bool:
+    """
+    Verify bearer token for API authentication.
+
+    Args:
+        credentials: HTTP Authorization credentials
+
+    Returns:
+        True if token is valid
+
+    Raises:
+        HTTPException: If token is invalid or missing
+    """
+    if not ADMIN_API_TOKEN:
+        # If no token configured, allow all requests (development mode)
+        logger.warning("No ADMIN_API_TOKEN configured - allowing unauthenticated request")
+        return True
+
+    if credentials.credentials != ADMIN_API_TOKEN:
+        logger.warning(f"Invalid authentication token provided")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    return True
 
 
 @contextmanager
@@ -188,7 +227,7 @@ def _process_reservation_decision(
 
 
 @app.get("/reservations/pending")
-def get_pending_reservations():
+def get_pending_reservations(authorized: bool = Depends(verify_token)):
     """List all pending reservations."""
     with get_db_connection() as conn:
         conn.row_factory = sqlite3.Row  # Enable dict-like access
@@ -241,7 +280,12 @@ def get_pending_reservations():
 
 
 @app.post("/reservations/{reservation_id}/approve")
-def approve_reservation(reservation_id: int, request: ApprovalRequest, thread_id: str = "admin_admin1"):
+def approve_reservation(
+    reservation_id: int,
+    request: ApprovalRequest,
+    thread_id: str = "admin_admin1",
+    authorized: bool = Depends(verify_token)
+):
     """
     Approve reservation - called from admin CLI after interrupt.
     Resumes admin agent graph execution.
@@ -261,7 +305,12 @@ def approve_reservation(reservation_id: int, request: ApprovalRequest, thread_id
 
 
 @app.post("/reservations/{reservation_id}/reject")
-def reject_reservation(reservation_id: int, request: ApprovalRequest, thread_id: str = "admin_admin1"):
+def reject_reservation(
+    reservation_id: int,
+    request: ApprovalRequest,
+    thread_id: str = "admin_admin1",
+    authorized: bool = Depends(verify_token)
+):
     """
     Reject reservation - called from admin CLI after interrupt.
     Resumes admin agent graph execution.
@@ -281,7 +330,7 @@ def reject_reservation(reservation_id: int, request: ApprovalRequest, thread_id:
 
 
 @app.get("/reservations/{reservation_id}")
-def get_reservation_details(reservation_id: int):
+def get_reservation_details(reservation_id: int, authorized: bool = Depends(verify_token)):
     """Get details of a specific reservation."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
