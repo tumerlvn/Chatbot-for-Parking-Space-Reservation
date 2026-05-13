@@ -38,29 +38,27 @@ def map_to_user_state(orchestrator_state: OrchestratorState) -> GraphState:
     Returns:
         GraphState compatible with user agent
     """
-    user_input = orchestrator_state.get("user_state", {})
-
-    # Extract messages (required)
-    messages = user_input.get("messages", [])
+    # Extract messages from orchestrator state directly
+    messages = orchestrator_state.get("messages", [])
 
     # Build user agent state - only include fields that are explicitly provided
     # Let subgraph checkpoint handle fields not provided (like reservation_data)
     mapped_state = {"messages": messages}
 
-    # Only include optional fields if they're explicitly set in user_input
-    if "intent" in user_input:
-        mapped_state["intent"] = user_input["intent"]
-    if "reservation_data" in user_input:
-        mapped_state["reservation_data"] = user_input["reservation_data"]
-    if "next_action" in user_input:
-        mapped_state["next_action"] = user_input["next_action"]
+    # Only include optional fields if they're present in orchestrator state
+    if orchestrator_state.get("intent"):
+        mapped_state["intent"] = orchestrator_state.get("intent")
+    if orchestrator_state.get("reservation_data"):
+        mapped_state["reservation_data"] = orchestrator_state.get("reservation_data")
+    if orchestrator_state.get("next_action"):
+        mapped_state["next_action"] = orchestrator_state.get("next_action")
 
     # Pass the MAPPED user thread ID if available
-    if "user_thread_id" in orchestrator_state:
-        mapped_state["thread_id"] = orchestrator_state["user_thread_id"]
-    elif "thread_id" in orchestrator_state:
+    if orchestrator_state.get("user_thread_id"):
+        mapped_state["thread_id"] = orchestrator_state.get("user_thread_id")
+    elif orchestrator_state.get("thread_id"):
         # Fallback to base thread if mapping not set yet
-        mapped_state["thread_id"] = orchestrator_state["thread_id"]
+        mapped_state["thread_id"] = orchestrator_state.get("thread_id")
 
     return mapped_state
 
@@ -75,35 +73,33 @@ def map_to_admin_state(orchestrator_state: OrchestratorState) -> AdminGraphState
     Returns:
         AdminGraphState compatible with admin agent
     """
-    admin_input = orchestrator_state.get("admin_state", {})
-
-    # Extract messages (required)
-    messages = admin_input.get("messages", [])
+    # Extract messages from orchestrator state directly
+    messages = orchestrator_state.get("messages", [])
 
     # Build admin agent state - only include fields that are explicitly provided
     # Let subgraph checkpoint handle fields not provided (like action_data)
     mapped_state = {"messages": messages}
 
-    # Only include optional fields if they're explicitly set in admin_input
-    if "intent" in admin_input:
-        mapped_state["intent"] = admin_input["intent"]
-    if "action_data" in admin_input:
-        mapped_state["action_data"] = admin_input["action_data"]
-    if "admin_id" in admin_input:
-        mapped_state["admin_id"] = admin_input["admin_id"]
+    # Only include optional fields if they're present in orchestrator state
+    if orchestrator_state.get("intent"):
+        mapped_state["intent"] = orchestrator_state.get("intent")
+    if orchestrator_state.get("action_data"):
+        mapped_state["action_data"] = orchestrator_state.get("action_data")
+    if orchestrator_state.get("admin_id"):
+        mapped_state["admin_id"] = orchestrator_state.get("admin_id")
 
     # CRITICAL: Pass the MAPPED admin thread ID, not the base thread ID
     # This ensures the curl command in the interrupt uses the correct thread
-    if "admin_thread_id" in orchestrator_state:
-        mapped_state["thread_id"] = orchestrator_state["admin_thread_id"]
-    elif "thread_id" in orchestrator_state:
+    if orchestrator_state.get("admin_thread_id"):
+        mapped_state["thread_id"] = orchestrator_state.get("admin_thread_id")
+    elif orchestrator_state.get("thread_id"):
         # Fallback to base thread if mapping not set yet
-        mapped_state["thread_id"] = orchestrator_state["thread_id"]
+        mapped_state["thread_id"] = orchestrator_state.get("thread_id")
 
-    if "should_write_confirmation" in admin_input:
-        mapped_state["should_write_confirmation"] = admin_input["should_write_confirmation"]
-    if "reservation_details" in admin_input:
-        mapped_state["reservation_details"] = admin_input["reservation_details"]
+    if orchestrator_state.get("should_write_confirmation"):
+        mapped_state["should_write_confirmation"] = orchestrator_state.get("should_write_confirmation")
+    if orchestrator_state.get("reservation_details"):
+        mapped_state["reservation_details"] = orchestrator_state.get("reservation_details")
 
     return mapped_state
 

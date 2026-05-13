@@ -169,6 +169,12 @@ def _process_reservation_decision(
 
         # Update action_data with completion flag
         current_action_data = current_state.values.get("action_data", {})
+
+        # Handle Pydantic model
+        if hasattr(current_action_data, 'model_dump'):
+            current_action_data = current_action_data.model_dump()
+        elif hasattr(current_action_data, 'dict'):
+            current_action_data = current_action_data.dict()
         updated_action_data = {
             **current_action_data,
             "completed": True,
@@ -188,7 +194,6 @@ def _process_reservation_decision(
         # Pass None as input to resume from interrupt
         result = admin_agent_graph.invoke(None, config)
 
-        logger.info(f"[API] Graph execution result: {result}")
         logger.info(f"[API] Graph execution completed: action_data = {result.get('action_data', {})}")
 
         # Verify the database was updated

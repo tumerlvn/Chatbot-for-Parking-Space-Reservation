@@ -174,12 +174,15 @@ Respond with ONLY the number, or "none" if no number found.
     # Store action data for later execution
     action_type = "approve" if intent == "approve" else "reject"
 
-    updated_action_data = {
-        "action_type": action_type,
-        "reservation_id": reservation_id,
-        "admin_notes": "",
-        "completed": False
-    }
+    # Import AdminActionData to create proper Pydantic model
+    from .admin_state import AdminActionData
+
+    updated_action_data = AdminActionData(
+        action_type=action_type,
+        reservation_id=reservation_id,
+        admin_notes="",
+        completed=False
+    )
 
     # Get thread_id from state for API call
     thread_id = state.get("thread_id", "admin_admin1")
@@ -195,7 +198,7 @@ curl -X POST "http://localhost:8000/reservations/{reservation_id}/{action_type}?
 Waiting for API confirmation...
 """
 
-    print(f"[ADMIN AGENT INTERRUPT] Waiting for {action_type} confirmation via API for reservation #{reservation_id}")
+    logger.info(f"[ADMIN AGENT INTERRUPT] Waiting for {action_type} confirmation via API for reservation #{reservation_id}")
 
     return {
         **state,
@@ -206,14 +209,16 @@ Waiting for API confirmation...
 
 def execute_action_node(state: AdminGraphState) -> AdminGraphState:
     """Execute approved/rejected action after API confirmation."""
-    action_data = state.get("action_data", {})
+    import logging
+    logger = logging.getLogger(__name__)
 
-    print(f"[execute_action_node] Called with action_data: {action_data}")
+    action_data = state.get("action_data", {})
+    logger.info(f"[execute_action_node] Called with action_data: {action_data}")
 
     if not action_data.get("completed"):
         # Should not reach here without API confirmation
         error_text = "Action not yet confirmed via API."
-        print(f"[execute_action_node] Not completed, returning error")
+        logger.warning(f"[execute_action_node] Not completed, returning error")
         return {
             **state,
             "messages": state["messages"] + [AIMessage(content=error_text)]
@@ -223,17 +228,17 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
     action_type = action_data.get("action_type")
     admin_notes = action_data.get("admin_notes", "")
 
-    print(f"[execute_action_node] Executing {action_type} for reservation #{reservation_id}")
+    logger.info(f"[execute_action_node] Executing {action_type} for reservation #{reservation_id}")
 
     # Update database using shared service
     new_status = "approved" if action_type == "approve" else "rejected"
-    print(f"[execute_action_node] Updating reservation {reservation_id} to status: {new_status}")
+    logger.info(f"[execute_action_node] Updating reservation {reservation_id} to status: {new_status}")
 
     admin_id = state.get("admin_id")
     success = db_service.update_reservation_status(reservation_id, new_status, admin_id)
 
     if not success:
-        print(f"[execute_action_node] ERROR: Failed to update reservation {reservation_id}")
+        logger.error(f"[execute_action_node] Failed to update reservation {reservation_id}")
         return {
             **state,
             "messages": state["messages"] + [AIMessage(content=f"Error: Failed to update reservation #{reservation_id}")]
@@ -244,7 +249,7 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
         reservation = db_service.get_reservation(reservation_id)
         if reservation:
             spot_id = reservation["spot_id"]
-            print(f"[execute_action_node] Marking spot {spot_id} as occupied")
+            logger.info(f"[execute_action_node] Marking spot {spot_id} as occupied")
 
             with db_service.get_connection() as conn:
                 cursor = conn.cursor()
@@ -254,11 +259,11 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
                     WHERE id = ?
                 """, (spot_id,))
                 conn.commit()
-                print(f"[execute_action_node] Spot marked as occupied")
+                logger.info(f"[execute_action_node] Spot marked as occupied")
         else:
-            print(f"[execute_action_node] WARNING: Could not find reservation {reservation_id}")
+            logger.warning(f"[execute_action_node] Could not find reservation {reservation_id}")
 
-    print(f"[execute_action_node] Update successful!")
+    logger.info(f"[execute_action_node] Update successful!")
 
     # NEW: Set flag and details for confirmation node (only for approvals)
     should_write_confirmation = False
@@ -278,18 +283,18 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
                     "start_time": reservation["start_time"],
                     "end_time": reservation["end_time"]
                 }
-                print(f"[execute_action_node] Will route to confirmation node")
+                logger.info(f"[execute_action_node] Will route to confirmation node")
             else:
-                print(f"[execute_action_node] WARNING: Could not fetch reservation data")
+                logger.warning(f"[execute_action_node] Could not fetch reservation data")
 
         except Exception as e:
-            print(f"[execute_action_node] WARNING: Failed to fetch reservation details: {e}")
+            logger.warning(f"[execute_action_node] Failed to fetch reservation details: {e}")
 
     success_text = f"Reservation #{reservation_id} has been {new_status}."
     if admin_notes:
         success_text += f"\nNotes: {admin_notes}"
 
-    print(f"[execute_action_node] Returning success message")
+    logger.info(f"[execute_action_node] Returning success message")
     return {
         **state,
         "messages": state["messages"] + [AIMessage(content=success_text)],
@@ -305,24 +310,24 @@ def write_confirmation_node(state: AdminGraphState) -> AdminGraphState:
 
     This node uses bind_tools() pattern to let the LLM call the confirmation tool.
     """
-    print(f"[write_confirmation_node] Called")
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"[write_confirmation_node] Called")
 
     reservation_details = state.get("reservation_details", {})
 
     if not reservation_details:
-        print(f"[write_confirmation_node] WARNING: No reservation details, skipping")
+        logger.warning(f"[write_confirmation_node] No reservation details, skipping")
         return state
 
     # Get LLM and bind the confirmation tool
-    import logging
-    logger = logging.getLogger(__name__)
 
     try:
         llm = _get_llm()
         llm_with_tools = llm.bind_tools([write_confirmation_tool])
     except Exception as e:
-        logger.error(f"Failed to initialize LLM in write_confirmation_node: {e}")
-        print(f"[write_confirmation_node] ERROR: Failed to initialize LLM: {e}")
+        logger.error(f"[write_confirmation_node] Failed to initialize LLM: {e}")
         return {
             **state,
             "messages": state["messages"] + [
@@ -342,29 +347,29 @@ Reservation Details:
 
 Use the write_confirmation tool to record this confirmation."""
 
-    print(f"[write_confirmation_node] Invoking LLM with bound tools")
+    logger.info(f"[write_confirmation_node] Invoking LLM with bound tools")
 
     try:
         # Invoke LLM - it will call the tool
         result = llm_with_tools.invoke([HumanMessage(content=prompt)])
 
-        print(f"[write_confirmation_node] LLM response: {result}")
+        logger.debug(f"[write_confirmation_node] LLM response: {result}")
 
         # Check if tool was called
         if hasattr(result, 'tool_calls') and result.tool_calls:
-            print(f"[write_confirmation_node] Tool calls found: {len(result.tool_calls)}")
+            logger.info(f"[write_confirmation_node] Tool calls found: {len(result.tool_calls)}")
 
             # Execute the tool calls
             for tool_call in result.tool_calls:
                 tool_name = tool_call.get('name')
                 tool_args = tool_call.get('args', {})
 
-                print(f"[write_confirmation_node] Executing tool: {tool_name}")
-                print(f"[write_confirmation_node] Tool args: {tool_args}")
+                logger.info(f"[write_confirmation_node] Executing tool: {tool_name}")
+                logger.debug(f"[write_confirmation_node] Tool args: {tool_args}")
 
                 if tool_name == "write_confirmation":
                     tool_result = write_confirmation_tool.invoke(tool_args)
-                    print(f"[write_confirmation_node] Tool result: {tool_result}")
+                    logger.info(f"[write_confirmation_node] Tool result: {tool_result}")
 
                     # Add tool result to messages
                     return {

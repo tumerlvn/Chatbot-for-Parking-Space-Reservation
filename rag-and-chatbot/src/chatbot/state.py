@@ -23,6 +23,34 @@ class ReservationData(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
+    def __getitem__(self, key: str) -> Any:
+        """Enable dictionary-style access for backward compatibility."""
+        return getattr(self, key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        """Enable dictionary-style assignment for backward compatibility."""
+        setattr(self, key, value)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Enable dict.get() style access for backward compatibility."""
+        return getattr(self, key, default)
+
+    def __iter__(self):
+        """Enable iteration over keys for dict unpacking."""
+        return iter(self.model_fields.keys())
+
+    def keys(self):
+        """Return keys."""
+        return self.model_fields.keys()
+
+    def items(self):
+        """Return items."""
+        return ((k, getattr(self, k)) for k in self.model_fields.keys())
+
+    def values(self):
+        """Return values."""
+        return (getattr(self, k) for k in self.model_fields.keys())
+
 
 class GraphState(BaseModel):
     """State that flows through the LangGraph."""
