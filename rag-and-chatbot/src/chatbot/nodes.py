@@ -2,6 +2,7 @@
 
 import os
 import logging
+import sqlite3
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 
@@ -271,11 +272,12 @@ def _check_parking_availability(start_time: str, end_time: str) -> Dict[str, Any
         spots_list = []
         try:
             with db_service.get_connection() as conn:
+                conn.row_factory = sqlite3.Row  # Enable dict-like access
                 cursor = conn.cursor()
                 for spot in result["available_spots"]:
                     cursor.execute("SELECT price_per_hour FROM parking_spots WHERE id = ?", (spot["id"],))
                     row = cursor.fetchone()
-                    price = row[0] if row else 0
+                    price = row["price_per_hour"] if row else 0
 
                     spots_list.append({
                         "id": spot["id"],
