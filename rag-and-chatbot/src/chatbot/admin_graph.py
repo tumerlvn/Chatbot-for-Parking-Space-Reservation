@@ -29,13 +29,16 @@ def route_admin_intent(state: AdminGraphState) -> str:
 
 def route_after_execute(state: AdminGraphState) -> str:
     """Route after execute_action: write confirmation if approved, else end."""
+    import logging
+    logger = logging.getLogger(__name__)
+
     should_write = state.get("should_write_confirmation", False)
 
     if should_write:
-        print("[route_after_execute] Routing to write_confirmation")
+        logger.info("[route_after_execute] Routing to write_confirmation")
         return "write_confirmation"
     else:
-        print("[route_after_execute] Routing to END")
+        logger.info("[route_after_execute] Routing to END")
         return "end"
 
 

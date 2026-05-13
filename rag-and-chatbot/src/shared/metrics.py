@@ -2,9 +2,12 @@
 
 import threading
 import time
+import logging
 from typing import Dict, Any, List
 from datetime import datetime
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 
 class Metrics:
@@ -203,40 +206,40 @@ class Metrics:
         """Print a formatted summary of metrics."""
         snapshot = self.get_snapshot()
 
-        print("\n" + "="*60)
-        print("SYSTEM METRICS SUMMARY")
-        print("="*60)
-        print(f"Uptime: {snapshot['uptime_seconds']}s")
-        print(f"Timestamp: {snapshot['timestamp']}")
+        logger.info("="*60)
+        logger.info("SYSTEM METRICS SUMMARY")
+        logger.info("="*60)
+        logger.info(f"Uptime: {snapshot['uptime_seconds']}s")
+        logger.info(f"Timestamp: {snapshot['timestamp']}")
 
-        print("\n[REQUESTS]")
-        print(f"  Total: {snapshot['requests']['total']}")
-        print(f"  User: {snapshot['requests']['user']}")
-        print(f"  Admin: {snapshot['requests']['admin']}")
-        print(f"  Rate: {snapshot['requests']['requests_per_minute']} req/min")
+        logger.info("[REQUESTS]")
+        logger.info(f"  Total: {snapshot['requests']['total']}")
+        logger.info(f"  User: {snapshot['requests']['user']}")
+        logger.info(f"  Admin: {snapshot['requests']['admin']}")
+        logger.info(f"  Rate: {snapshot['requests']['requests_per_minute']} req/min")
 
-        print("\n[RESPONSE TIMES]")
-        print(f"  Average: {snapshot['response_times']['avg']}s")
-        print(f"  Min: {snapshot['response_times']['min']}s")
-        print(f"  Max: {snapshot['response_times']['max']}s")
-        print(f"  P50: {snapshot['response_times']['p50']}s")
-        print(f"  P95: {snapshot['response_times']['p95']}s")
-        print(f"  P99: {snapshot['response_times']['p99']}s")
+        logger.info("[RESPONSE TIMES]")
+        logger.info(f"  Average: {snapshot['response_times']['avg']}s")
+        logger.info(f"  Min: {snapshot['response_times']['min']}s")
+        logger.info(f"  Max: {snapshot['response_times']['max']}s")
+        logger.info(f"  P50: {snapshot['response_times']['p50']}s")
+        logger.info(f"  P95: {snapshot['response_times']['p95']}s")
+        logger.info(f"  P99: {snapshot['response_times']['p99']}s")
 
-        print("\n[ERRORS]")
-        print(f"  Total: {snapshot['errors']['total']}")
-        print(f"  LLM: {snapshot['errors']['llm']}")
-        print(f"  Database: {snapshot['errors']['db']}")
-        print(f"  Error Rate: {snapshot['errors']['error_rate']}%")
+        logger.info("[ERRORS]")
+        logger.info(f"  Total: {snapshot['errors']['total']}")
+        logger.info(f"  LLM: {snapshot['errors']['llm']}")
+        logger.info(f"  Database: {snapshot['errors']['db']}")
+        logger.info(f"  Error Rate: {snapshot['errors']['error_rate']}%")
 
-        print("\n[RESERVATIONS]")
-        print(f"  Created: {snapshot['reservations']['created']}")
-        print(f"  Approved: {snapshot['reservations']['approved']}")
-        print(f"  Rejected: {snapshot['reservations']['rejected']}")
-        print(f"  Pending: {snapshot['reservations']['pending']}")
-        print(f"  Approval Rate: {snapshot['reservations']['approval_rate']}%")
+        logger.info("[RESERVATIONS]")
+        logger.info(f"  Created: {snapshot['reservations']['created']}")
+        logger.info(f"  Approved: {snapshot['reservations']['approved']}")
+        logger.info(f"  Rejected: {snapshot['reservations']['rejected']}")
+        logger.info(f"  Pending: {snapshot['reservations']['pending']}")
+        logger.info(f"  Approval Rate: {snapshot['reservations']['approval_rate']}%")
 
-        print("\n" + "="*60 + "\n")
+        logger.info("="*60)
 
     def reset(self):
         """Reset all metrics."""

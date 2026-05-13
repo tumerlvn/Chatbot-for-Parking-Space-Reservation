@@ -1,9 +1,12 @@
 """Event system with pub/sub pattern for cross-agent communication."""
 
 import threading
+import logging
 from typing import Dict, Any, Callable, List, Optional
 from datetime import datetime
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -120,7 +123,7 @@ class EventBus:
             try:
                 handler(event)
             except Exception as e:
-                print(f"[EventBus] Error in event handler: {e}")
+                logger.error(f"[EventBus] Error in event handler: {e}")
 
     def get_event_log(self, event_type: Optional[str] = None, limit: int = 100) -> List[Event]:
         """

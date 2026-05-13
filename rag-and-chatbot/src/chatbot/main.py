@@ -25,13 +25,9 @@ class ParkingChatbot:
         # Route through orchestrator with checkpoint support
         config = {"configurable": {"thread_id": self.thread_id}}
 
+        # No mode setting - orchestrator will auto-detect intent!
         result = self.orchestrator.invoke({
-            "mode": "user",
-            "user_state": {
-                "messages": [HumanMessage(content=user_message)],
-                "intent": None,
-                "next_action": None
-            },
+            "messages": [HumanMessage(content=user_message)],
             "thread_id": self.thread_id,
             "session_id": self.thread_id,
             "events": [],
@@ -52,14 +48,10 @@ class ParkingChatbot:
         # Stream through orchestrator (now has checkpointer)
         config = {"configurable": {"thread_id": self.thread_id}}
 
+        # No mode setting - orchestrator will auto-detect intent!
         for event in self.orchestrator.stream(
             {
-                "mode": "user",
-                "user_state": {
-                    "messages": [HumanMessage(content=user_message)],
-                    "intent": None,
-                    "next_action": None
-                },
+                "messages": [HumanMessage(content=user_message)],
                 "thread_id": self.thread_id,
                 "session_id": self.thread_id,
                 "events": [],
@@ -90,8 +82,12 @@ class ParkingChatbot:
 def run_cli():
     """Run chatbot in interactive CLI mode."""
     print("\n" + "="*60)
-    print("SmartPark City Center - Parking Reservation Chatbot")
+    print("SmartPark City Center - Unified Reservation System")
     print("="*60)
+    print("\nFeatures:")
+    print("  - User reservations: 'I want to park tomorrow'")
+    print("  - Admin management: 'Show pending reservations'")
+    print("  - Automatic flow: User → Admin → Confirmation")
     print("\nCommands:")
     print("  - Type your message to chat")
     print("  - 'reset' to start a new conversation")

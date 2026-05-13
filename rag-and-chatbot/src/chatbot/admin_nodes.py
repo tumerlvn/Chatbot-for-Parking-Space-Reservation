@@ -20,7 +20,18 @@ def _get_llm():
 
 def admin_router_node(state: AdminGraphState) -> AdminGraphState:
     """Classify admin's intent."""
-    llm = _get_llm()
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        llm = _get_llm()
+    except Exception as e:
+        logger.error(f"Failed to initialize LLM in admin_router_node: {e}")
+        return {
+            **state,
+            "intent": "list_pending",  # Default safe intent
+            "messages": state["messages"] + [AIMessage(content="I'm having trouble connecting to the AI service. Showing pending reservations as default.")]
+        }
 
     last_message = state["messages"][-1]
     user_input = last_message.content if hasattr(last_message, 'content') else str(last_message)
@@ -46,11 +57,20 @@ Admin message: "{user_input}"
 Respond with ONLY one word: "list_pending", "approve", "reject", or "query"
 """
 
-    response = llm.invoke([SystemMessage(content=classification_prompt)])
-    intent = response.content.strip().lower()
+    try:
+        response = llm.invoke([SystemMessage(content=classification_prompt)])
+        intent = response.content.strip().lower()
 
-    if intent not in ["list_pending", "approve", "reject", "query"]:
-        intent = "list_pending"
+        if intent not in ["list_pending", "approve", "reject", "query"]:
+            intent = "list_pending"
+    except Exception as e:
+        logger.error(f"LLM invocation failed in admin_router_node: {e}")
+        intent = "list_pending"  # Default safe intent
+        return {
+            **state,
+            "intent": intent,
+            "messages": state["messages"] + [AIMessage(content="I encountered an error processing your request. Showing pending reservations as default.")]
+        }
 
     return {
         **state,
@@ -84,7 +104,18 @@ def list_pending_node(state: AdminGraphState) -> AdminGraphState:
 
 def initiate_action_node(state: AdminGraphState) -> AdminGraphState:
     """Admin initiates approve/reject - INTERRUPT POINT."""
-    llm = _get_llm()
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        llm = _get_llm()
+    except Exception as e:
+        logger.error(f"Failed to initialize LLM in initiate_action_node: {e}")
+        error_text = "I'm having trouble connecting to the AI service. Please try again later."
+        return {
+            **state,
+            "messages": state["messages"] + [AIMessage(content=error_text)]
+        }
 
     last_message = state["messages"][-1]
     user_input = last_message.content if hasattr(last_message, 'content') else str(last_message)
@@ -98,8 +129,16 @@ def initiate_action_node(state: AdminGraphState) -> AdminGraphState:
 Respond with ONLY the number, or "none" if no number found.
 """
 
-    response = llm.invoke([HumanMessage(content=extraction_prompt)])
-    res_id_str = response.content.strip()
+    try:
+        response = llm.invoke([HumanMessage(content=extraction_prompt)])
+        res_id_str = response.content.strip()
+    except Exception as e:
+        logger.error(f"LLM invocation failed in initiate_action_node: {e}")
+        error_text = "I encountered an error processing your request. Please try again."
+        return {
+            **state,
+            "messages": state["messages"] + [AIMessage(content=error_text)]
+        }
 
     try:
         reservation_id = int(res_id_str)
@@ -135,12 +174,15 @@ Respond with ONLY the number, or "none" if no number found.
     # Store action data for later execution
     action_type = "approve" if intent == "approve" else "reject"
 
-    updated_action_data = {
-        "action_type": action_type,
-        "reservation_id": reservation_id,
-        "admin_notes": "",
-        "completed": False
-    }
+    # Import AdminActionData to create proper Pydantic model
+    from .admin_state import AdminActionData
+
+    updated_action_data = AdminActionData(
+        action_type=action_type,
+        reservation_id=reservation_id,
+        admin_notes="",
+        completed=False
+    )
 
     # Get thread_id from state for API call
     thread_id = state.get("thread_id", "admin_admin1")
@@ -156,7 +198,7 @@ curl -X POST "http://localhost:8000/reservations/{reservation_id}/{action_type}?
 Waiting for API confirmation...
 """
 
-    print(f"[ADMIN AGENT INTERRUPT] Waiting for {action_type} confirmation via API for reservation #{reservation_id}")
+    logger.info(f"[ADMIN AGENT INTERRUPT] Waiting for {action_type} confirmation via API for reservation #{reservation_id}")
 
     return {
         **state,
@@ -167,14 +209,16 @@ Waiting for API confirmation...
 
 def execute_action_node(state: AdminGraphState) -> AdminGraphState:
     """Execute approved/rejected action after API confirmation."""
-    action_data = state.get("action_data", {})
+    import logging
+    logger = logging.getLogger(__name__)
 
-    print(f"[execute_action_node] Called with action_data: {action_data}")
+    action_data = state.get("action_data", {})
+    logger.info(f"[execute_action_node] Called with action_data: {action_data}")
 
     if not action_data.get("completed"):
         # Should not reach here without API confirmation
         error_text = "Action not yet confirmed via API."
-        print(f"[execute_action_node] Not completed, returning error")
+        logger.warning(f"[execute_action_node] Not completed, returning error")
         return {
             **state,
             "messages": state["messages"] + [AIMessage(content=error_text)]
@@ -184,17 +228,17 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
     action_type = action_data.get("action_type")
     admin_notes = action_data.get("admin_notes", "")
 
-    print(f"[execute_action_node] Executing {action_type} for reservation #{reservation_id}")
+    logger.info(f"[execute_action_node] Executing {action_type} for reservation #{reservation_id}")
 
     # Update database using shared service
     new_status = "approved" if action_type == "approve" else "rejected"
-    print(f"[execute_action_node] Updating reservation {reservation_id} to status: {new_status}")
+    logger.info(f"[execute_action_node] Updating reservation {reservation_id} to status: {new_status}")
 
     admin_id = state.get("admin_id")
     success = db_service.update_reservation_status(reservation_id, new_status, admin_id)
 
     if not success:
-        print(f"[execute_action_node] ERROR: Failed to update reservation {reservation_id}")
+        logger.error(f"[execute_action_node] Failed to update reservation {reservation_id}")
         return {
             **state,
             "messages": state["messages"] + [AIMessage(content=f"Error: Failed to update reservation #{reservation_id}")]
@@ -205,7 +249,7 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
         reservation = db_service.get_reservation(reservation_id)
         if reservation:
             spot_id = reservation["spot_id"]
-            print(f"[execute_action_node] Marking spot {spot_id} as occupied")
+            logger.info(f"[execute_action_node] Marking spot {spot_id} as occupied")
 
             with db_service.get_connection() as conn:
                 cursor = conn.cursor()
@@ -215,11 +259,11 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
                     WHERE id = ?
                 """, (spot_id,))
                 conn.commit()
-                print(f"[execute_action_node] Spot marked as occupied")
+                logger.info(f"[execute_action_node] Spot marked as occupied")
         else:
-            print(f"[execute_action_node] WARNING: Could not find reservation {reservation_id}")
+            logger.warning(f"[execute_action_node] Could not find reservation {reservation_id}")
 
-    print(f"[execute_action_node] Update successful!")
+    logger.info(f"[execute_action_node] Update successful!")
 
     # NEW: Set flag and details for confirmation node (only for approvals)
     should_write_confirmation = False
@@ -239,18 +283,18 @@ def execute_action_node(state: AdminGraphState) -> AdminGraphState:
                     "start_time": reservation["start_time"],
                     "end_time": reservation["end_time"]
                 }
-                print(f"[execute_action_node] Will route to confirmation node")
+                logger.info(f"[execute_action_node] Will route to confirmation node")
             else:
-                print(f"[execute_action_node] WARNING: Could not fetch reservation data")
+                logger.warning(f"[execute_action_node] Could not fetch reservation data")
 
         except Exception as e:
-            print(f"[execute_action_node] WARNING: Failed to fetch reservation details: {e}")
+            logger.warning(f"[execute_action_node] Failed to fetch reservation details: {e}")
 
     success_text = f"Reservation #{reservation_id} has been {new_status}."
     if admin_notes:
         success_text += f"\nNotes: {admin_notes}"
 
-    print(f"[execute_action_node] Returning success message")
+    logger.info(f"[execute_action_node] Returning success message")
     return {
         **state,
         "messages": state["messages"] + [AIMessage(content=success_text)],
@@ -266,17 +310,30 @@ def write_confirmation_node(state: AdminGraphState) -> AdminGraphState:
 
     This node uses bind_tools() pattern to let the LLM call the confirmation tool.
     """
-    print(f"[write_confirmation_node] Called")
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"[write_confirmation_node] Called")
 
     reservation_details = state.get("reservation_details", {})
 
     if not reservation_details:
-        print(f"[write_confirmation_node] WARNING: No reservation details, skipping")
+        logger.warning(f"[write_confirmation_node] No reservation details, skipping")
         return state
 
     # Get LLM and bind the confirmation tool
-    llm = _get_llm()
-    llm_with_tools = llm.bind_tools([write_confirmation_tool])
+
+    try:
+        llm = _get_llm()
+        llm_with_tools = llm.bind_tools([write_confirmation_tool])
+    except Exception as e:
+        logger.error(f"[write_confirmation_node] Failed to initialize LLM: {e}")
+        return {
+            **state,
+            "messages": state["messages"] + [
+                AIMessage(content="Error: Failed to initialize AI service for confirmation writing.")
+            ]
+        }
 
     # Create a prompt for the LLM to write the confirmation
     prompt = f"""You are a parking reservation system. You need to write a confirmation for an approved reservation.
@@ -290,29 +347,29 @@ Reservation Details:
 
 Use the write_confirmation tool to record this confirmation."""
 
-    print(f"[write_confirmation_node] Invoking LLM with bound tools")
+    logger.info(f"[write_confirmation_node] Invoking LLM with bound tools")
 
     try:
         # Invoke LLM - it will call the tool
         result = llm_with_tools.invoke([HumanMessage(content=prompt)])
 
-        print(f"[write_confirmation_node] LLM response: {result}")
+        logger.debug(f"[write_confirmation_node] LLM response: {result}")
 
         # Check if tool was called
         if hasattr(result, 'tool_calls') and result.tool_calls:
-            print(f"[write_confirmation_node] Tool calls found: {len(result.tool_calls)}")
+            logger.info(f"[write_confirmation_node] Tool calls found: {len(result.tool_calls)}")
 
             # Execute the tool calls
             for tool_call in result.tool_calls:
                 tool_name = tool_call.get('name')
                 tool_args = tool_call.get('args', {})
 
-                print(f"[write_confirmation_node] Executing tool: {tool_name}")
-                print(f"[write_confirmation_node] Tool args: {tool_args}")
+                logger.info(f"[write_confirmation_node] Executing tool: {tool_name}")
+                logger.debug(f"[write_confirmation_node] Tool args: {tool_args}")
 
                 if tool_name == "write_confirmation":
                     tool_result = write_confirmation_tool.invoke(tool_args)
-                    print(f"[write_confirmation_node] Tool result: {tool_result}")
+                    logger.info(f"[write_confirmation_node] Tool result: {tool_result}")
 
                     # Add tool result to messages
                     return {
@@ -327,41 +384,28 @@ Use the write_confirmation tool to record this confirmation."""
                         ]
                     }
         else:
+            # LLM did not produce a tool call - log warning and return error state
+            logger.warning(f"LLM did not produce tool call in write_confirmation_node. Response type: {type(result)}")
             print(f"[write_confirmation_node] WARNING: No tool calls in LLM response")
             print(f"[write_confirmation_node] Response type: {type(result)}")
             print(f"[write_confirmation_node] Response content: {result.content if hasattr(result, 'content') else result}")
 
-            # Fallback: call tool directly
-            print(f"[write_confirmation_node] Falling back to direct tool invocation")
-            tool_result = write_confirmation_tool.invoke(reservation_details)
-            print(f"[write_confirmation_node] Direct tool result: {tool_result}")
-
             return {
                 **state,
                 "messages": state["messages"] + [
-                    AIMessage(content=f"Writing confirmation: {tool_result}")
+                    AIMessage(content="Error: Failed to generate confirmation properly. Please contact support.")
                 ]
             }
 
     except Exception as e:
+        logger.error(f"LLM invocation failed in write_confirmation_node: {e}", exc_info=True)
         print(f"[write_confirmation_node] ERROR: {e}")
-        import traceback
-        traceback.print_exc()
 
-        # Graceful degradation: try direct tool call
-        try:
-            print(f"[write_confirmation_node] Attempting direct tool call")
-            tool_result = write_confirmation_tool.invoke(reservation_details)
-            print(f"[write_confirmation_node] Direct tool result: {tool_result}")
-
-            return {
-                **state,
-                "messages": state["messages"] + [
-                    AIMessage(content=f"Confirmation written: {tool_result}")
-                ]
-            }
-        except Exception as e2:
-            print(f"[write_confirmation_node] ERROR in fallback: {e2}")
-            return state
+        return {
+            **state,
+            "messages": state["messages"] + [
+                AIMessage(content="Error: Failed to write confirmation. Please contact support.")
+            ]
+        }
 
     return state

@@ -1,7 +1,11 @@
 """Sensitive data protection for chatbot responses."""
 
 import re
+import logging
 from typing import Dict, List, Tuple
+from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification
+
+logger = logging.getLogger(__name__)
 
 
 class GuardRails:
@@ -9,6 +13,23 @@ class GuardRails:
 
     def __init__(self):
         """Initialize guard rails with detection patterns."""
+        # Initialize NLP-based PII detector (first layer)
+        try:
+            model_name = "dslim/bert-base-NER"
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.model = AutoModelForTokenClassification.from_pretrained(model_name)
+            self.ner_pipeline = pipeline(
+                "ner",
+                model=self.model,
+                tokenizer=self.tokenizer,
+                aggregation_strategy="simple"
+            )
+            logger.info("NLP-based PII detector initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize NLP-based PII detector: {e}")
+            self.ner_pipeline = None
+
+        # Regex patterns (second layer)
         self.pii_patterns = {
             "email": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
             "phone": r'\b(?:\+?1[-.]?)?\(?([0-9]{3})\)?[-.]?([0-9]{3})[-.]?([0-9]{4})\b',
@@ -37,13 +58,25 @@ class GuardRails:
         ]
 
     def scan_for_sensitive_data(self, text: str) -> Tuple[bool, List[str]]:
-        """Scan text for PII, system info, and forbidden keywords."""
+        """Scan text for PII, system info, and forbidden keywords using NLP + regex."""
         violations = []
 
-        # Check PII patterns
+        # FIRST LAYER: NLP-based PII detection using transformer model
+        if self.ner_pipeline:
+            try:
+                ner_results = self.ner_pipeline(text)
+                for entity in ner_results:
+                    entity_type = entity.get('entity_group', '')
+                    if entity_type in ['PER', 'ORG', 'LOC']:  # Person, Organization, Location
+                        violations.append(f"NLP-PII: {entity_type} detected")
+                        logger.debug(f"NLP detected {entity_type}: {entity.get('word')}")
+            except Exception as e:
+                logger.warning(f"NLP-based PII detection failed: {e}")
+
+        # SECOND LAYER: Regex-based PII patterns
         for pattern_name, pattern in self.pii_patterns.items():
             if re.search(pattern, text):
-                violations.append(f"PII: {pattern_name}")
+                violations.append(f"Regex-PII: {pattern_name}")
 
         # Check system patterns
         for pattern_name, pattern in self.system_patterns.items():

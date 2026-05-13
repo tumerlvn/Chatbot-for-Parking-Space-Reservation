@@ -1,7 +1,9 @@
 """Node functions for LangGraph chatbot."""
 
 import os
-from typing import Dict, Any
+import logging
+import sqlite3
+from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -17,13 +19,15 @@ from .guardrails import apply_guardrails, validate_query
 # Import shared services (use relative import to avoid path issues)
 from ..shared import db_service, get_llm
 
+logger = logging.getLogger(__name__)
+
 
 
 _vector_store = None
 _compression_retriever = None
 
 
-def _get_vector_store():
+def _get_vector_store() -> Milvus:
     """Lazy load Milvus vector store"""
     global _vector_store
     if _vector_store is None:
@@ -40,7 +44,7 @@ def _get_vector_store():
     return _vector_store
 
 
-def _get_compression_retriever():
+def _get_compression_retriever() -> ContextualCompressionRetriever:
     """Lazy load the reranking retriever"""
     global _compression_retriever
     if _compression_retriever is None:
@@ -57,7 +61,7 @@ def _get_compression_retriever():
     return _compression_retriever
 
 
-def _get_llm():
+def _get_llm() -> Any:
     """Lazy load LLM from shared pool"""
     return get_llm()
 
@@ -65,7 +69,15 @@ def _get_llm():
 
 def router_node(state: GraphState) -> GraphState:
     """Classify user intent: question, reservation, or status_check."""
-    llm = _get_llm()
+    try:
+        llm = _get_llm()
+    except Exception as e:
+        logger.error(f"Failed to get LLM: {e}")
+        return {
+            **state,
+            "intent": "question",
+            "next_action": "route_to_handler"
+        }
 
     last_message = state["messages"][-1]
     user_input = last_message.content if hasattr(last_message, 'content') else str(last_message)
@@ -118,11 +130,15 @@ User message: "{user_input}"
 Respond with ONLY one word: either "question", "reservation", or "status_check"
 """
 
-    response = llm.invoke([SystemMessage(content=classification_prompt)])
-    intent = response.content.strip().lower()
+    try:
+        response = llm.invoke([SystemMessage(content=classification_prompt)])
+        intent = response.content.strip().lower()
 
-    if intent not in ["question", "reservation", "status_check"]:
-        intent = "question"  # Default to question if unclear
+        if intent not in ["question", "reservation", "status_check"]:
+            intent = "question"  # Default to question if unclear
+    except Exception as e:
+        logger.error(f"LLM classification failed: {e}")
+        intent = "question"  # Default to question on error
 
     return {
         **state,
@@ -134,8 +150,19 @@ Respond with ONLY one word: either "question", "reservation", or "status_check"
 
 def rag_node(state: GraphState) -> GraphState:
     """Answer questions using RAG with real-time availability checks when needed."""
-    llm = _get_llm()
-    retriever = _get_compression_retriever()
+    try:
+        llm = _get_llm()
+        retriever = _get_compression_retriever()
+    except Exception as e:
+        logger.error(f"Failed to initialize LLM or retriever: {e}")
+        error_response = "I'm sorry, I'm having technical difficulties. Please try again later."
+        updated_messages = state["messages"] + [AIMessage(content=error_response)]
+        return {
+            **state,
+            "messages": updated_messages,
+            "retrieved_docs": [],  # Empty on failure
+            "next_action": "wait_for_user"
+        }
 
     last_message = state["messages"][-1]
     query = last_message.content if hasattr(last_message, 'content') else str(last_message)
@@ -147,10 +174,22 @@ def rag_node(state: GraphState) -> GraphState:
         return {
             **state,
             "messages": updated_messages,
+            "retrieved_docs": [],  # Empty on validation failure
             "next_action": "wait_for_user"
         }
 
-    docs = retriever.invoke(query)
+    try:
+        docs = retriever.invoke(query)
+    except Exception as e:
+        logger.error(f"Retriever invocation failed: {e}")
+        error_response = "I'm sorry, I couldn't retrieve the relevant information. Please try rephrasing your question."
+        updated_messages = state["messages"] + [AIMessage(content=error_response)]
+        return {
+            **state,
+            "messages": updated_messages,
+            "retrieved_docs": [],  # Empty on failure
+            "next_action": "wait_for_user"
+        }
 
     context = "\n\n".join([doc.page_content for doc in docs])
 
@@ -160,30 +199,38 @@ Question: "{query}"
 
 Respond with ONLY "yes" or "no"."""
 
-    availability_response = llm.invoke([SystemMessage(content=availability_check_prompt)])
-    is_availability_query = availability_response.content.strip().lower() == "yes"
+    try:
+        availability_response = llm.invoke([SystemMessage(content=availability_check_prompt)])
+        is_availability_query = availability_response.content.strip().lower() == "yes"
+    except Exception as e:
+        logger.error(f"LLM availability check failed: {e}")
+        is_availability_query = False
 
     realtime_data = ""
     if is_availability_query:
-        # Use shared database service
-        with db_service.get_connection() as conn:
-            cursor = conn.cursor()
+        try:
+            # Use shared database service
+            with db_service.get_connection() as conn:
+                cursor = conn.cursor()
 
-            cursor.execute("""
-                SELECT spot_type, COUNT(*) as available_count
-                FROM parking_spots
-                WHERE status = 'available'
-                GROUP BY spot_type
-            """)
+                cursor.execute("""
+                    SELECT spot_type, COUNT(*) as available_count
+                    FROM parking_spots
+                    WHERE status = 'available'
+                    GROUP BY spot_type
+                """)
 
-            availability = cursor.fetchall()
+                availability = cursor.fetchall()
 
-        if availability:
-            realtime_data = "\n\nCurrent Real-Time Availability:\n"
-            for spot_type, count in availability:
-                realtime_data += f"- {spot_type}: {count} spot(s) available\n"
-        else:
-            realtime_data = "\n\nCurrent Real-Time Availability: No spots currently available."
+            if availability:
+                realtime_data = "\n\nCurrent Real-Time Availability:\n"
+                for spot_type, count in availability:
+                    realtime_data += f"- {spot_type}: {count} spot(s) available\n"
+            else:
+                realtime_data = "\n\nCurrent Real-Time Availability: No spots currently available."
+        except Exception as e:
+            logger.error(f"Database availability check failed: {e}")
+            realtime_data = "\n\nNote: Unable to retrieve real-time availability at this moment."
 
     rag_prompt = f"""You are a helpful parking facility assistant. Answer the user's question based on the provided information.
 
@@ -197,15 +244,19 @@ Provide a helpful, concise answer. Combine policy information with real-time ava
 If the information is not in the context, say so politely.
 """
 
-    response = llm.invoke([HumanMessage(content=rag_prompt)])
-
-    filtered_response = apply_guardrails(response.content, user_context=state.get("reservation_data", {}))
+    try:
+        response = llm.invoke([HumanMessage(content=rag_prompt)])
+        filtered_response = apply_guardrails(response.content, user_context=state.get("reservation_data", {}))
+    except Exception as e:
+        logger.error(f"LLM response generation failed: {e}")
+        filtered_response = "I'm sorry, I encountered an error generating a response. Please try again."
 
     updated_messages = state["messages"] + [AIMessage(content=filtered_response)]
 
     return {
         **state,
         "messages": updated_messages,
+        "retrieved_docs": docs,  # Store retrieved documents for evaluation
         "next_action": "wait_for_user"
     }
 
@@ -213,38 +264,72 @@ If the information is not in the context, say so politely.
 
 def _check_parking_availability(start_time: str, end_time: str) -> Dict[str, Any]:
     """Check spot availability excluding time conflicts with existing reservations."""
-    # Use shared database service
-    result = db_service.check_availability(start_time, end_time)
+    try:
+        # Use shared database service
+        result = db_service.check_availability(start_time, end_time)
 
-    # Get price information for each spot (db_service doesn't include this yet)
-    spots_list = []
-    with db_service.get_connection() as conn:
-        cursor = conn.cursor()
-        for spot in result["available_spots"]:
-            cursor.execute("SELECT price_per_hour FROM parking_spots WHERE id = ?", (spot["id"],))
-            row = cursor.fetchone()
-            price = row[0] if row else 0
+        # Get price information for each spot (db_service doesn't include this yet)
+        spots_list = []
+        try:
+            with db_service.get_connection() as conn:
+                conn.row_factory = sqlite3.Row  # Enable dict-like access
+                cursor = conn.cursor()
+                for spot in result["available_spots"]:
+                    cursor.execute("SELECT price_per_hour FROM parking_spots WHERE id = ?", (spot["id"],))
+                    row = cursor.fetchone()
+                    price = row["price_per_hour"] if row else 0
 
-            spots_list.append({
-                "id": spot["id"],
-                "number": spot["spot_number"],
-                "type": spot["spot_type"],
-                "floor": spot["floor"],
-                "price": price
-            })
+                    spots_list.append({
+                        "id": spot["id"],
+                        "number": spot["spot_number"],
+                        "type": spot["spot_type"],
+                        "floor": spot["floor"],
+                        "price": price
+                    })
+        except Exception as e:
+            logger.error(f"Database query for spot prices failed: {e}")
+            # Continue with spots but no price info
+            spots_list = [
+                {
+                    "id": spot["id"],
+                    "number": spot["spot_number"],
+                    "type": spot["spot_type"],
+                    "floor": spot["floor"],
+                    "price": 0
+                }
+                for spot in result["available_spots"]
+            ]
 
-    return {
-        "available": len(spots_list) > 0,
-        "spots": spots_list,
-        "count_by_type": result["count_by_type"],
-        "total_count": len(spots_list)
-    }
+        return {
+            "available": len(spots_list) > 0,
+            "spots": spots_list,
+            "count_by_type": result["count_by_type"],
+            "total_count": len(spots_list)
+        }
+    except Exception as e:
+        logger.error(f"Availability check failed: {e}")
+        return {
+            "available": False,
+            "spots": [],
+            "count_by_type": {},
+            "total_count": 0
+        }
 
 
 
 def reservation_collector_node(state: GraphState) -> GraphState:
     """Collect reservation details: times, availability, name, car number, spot type."""
-    llm = _get_llm()
+    try:
+        llm = _get_llm()
+    except Exception as e:
+        logger.error(f"Failed to get LLM for reservation collector: {e}")
+        error_response = "I'm sorry, I'm having technical difficulties processing your reservation. Please try again later."
+        return {
+            **state,
+            "messages": state["messages"] + [AIMessage(content=error_response)],
+            "next_action": "wait_for_user"
+        }
+
     reservation_data = state.get("reservation_data", {})
 
     last_message = state["messages"][-1]
@@ -310,7 +395,17 @@ end_time: [extracted end time or "none"]
 preferred_spot_type: [extracted spot type (Standard/EV/Accessible) or "none"]
 """
 
-    extraction_response = llm.invoke([HumanMessage(content=extraction_prompt)])
+    try:
+        extraction_response = llm.invoke([HumanMessage(content=extraction_prompt)])
+    except Exception as e:
+        logger.error(f"LLM extraction failed in reservation collector: {e}")
+        error_response = "I'm sorry, I couldn't process that. Could you please repeat that information?"
+        return {
+            **state,
+            "messages": state["messages"] + [AIMessage(content=error_response)],
+            "reservation_data": reservation_data,
+            "next_action": "wait_for_user"
+        }
 
     # Only update fields that aren't already set
     for line in extraction_response.content.split('\n'):
@@ -326,9 +421,11 @@ preferred_spot_type: [extracted spot type (Standard/EV/Accessible) or "none"]
 
     if not reservation_data.get("start_time"):
         response_text = "I'd be happy to help you with a parking reservation! When would you like to start parking? (Please provide date and time)"
+        response_text = apply_guardrails(response_text, user_context=reservation_data)
 
     elif not reservation_data.get("end_time"):
         response_text = "Great! And when do you plan to leave? (Please provide date and time)"
+        response_text = apply_guardrails(response_text, user_context=reservation_data)
 
     elif not reservation_data.get("availability_checked"):
         availability = _check_parking_availability(
@@ -347,6 +444,7 @@ Would you like to:
 2. Check availability for another day
 
 You can also ask me about our operating hours and pricing."""
+            response_text = apply_guardrails(response_text, user_context=reservation_data)
 
             # Reset times so user can try again
             reservation_data.pop("start_time", None)
@@ -369,6 +467,7 @@ You can also ask me about our operating hours and pricing."""
 To complete your pre-reservation, I'll need a few more details.
 
 What is your full name?"""
+            response_text = apply_guardrails(response_text, user_context=reservation_data)
 
             # Store availability info for later use
             reservation_data["available_spots"] = availability["spots"]
@@ -376,9 +475,11 @@ What is your full name?"""
 
     elif not reservation_data.get("name"):
         response_text = "What is your full name?"
+        response_text = apply_guardrails(response_text, user_context=reservation_data)
 
     elif not reservation_data.get("car_number"):
         response_text = f"Thank you, {reservation_data['name']}! What is your vehicle's license plate number?"
+        response_text = apply_guardrails(response_text, user_context=reservation_data)
 
     elif not reservation_data.get("preferred_spot_type"):
         # Get available spot types from count_by_type
@@ -396,6 +497,7 @@ Which type would you prefer? (Please choose: Standard, EV, or Accessible)"""
         else:
             # Fallback if somehow count_by_type is missing
             response_text = "Which spot type would you prefer: Standard, EV, or Accessible?"
+        response_text = apply_guardrails(response_text, user_context=reservation_data)
 
     else:
         # Get the preferred spot type name for display
@@ -412,6 +514,7 @@ Which type would you prefer? (Please choose: Standard, EV, or Accessible)"""
   Preferred Spot Type: {preferred_type}
 
 Your information has been collected. Processing your reservation..."""
+        response_text = apply_guardrails(response_text, user_context=reservation_data)
 
     updated_messages = state["messages"] + [AIMessage(content=response_text)]
 
@@ -443,16 +546,24 @@ def create_reservation_node(state: GraphState) -> GraphState:
             "next_action": "wait_for_user"
         }
 
-    # Use shared database service to create reservation
-    thread_id = state.get("thread_id")
-    reservation_id = db_service.create_reservation({
-        "spot_id": selected_spot["id"],
-        "name": reservation_data["name"],
-        "car_number": reservation_data["car_number"],
-        "start_time": reservation_data["start_time"],
-        "end_time": reservation_data["end_time"],
-        "thread_id": thread_id
-    })
+    try:
+        # Use shared database service to create reservation
+        thread_id = state.get("thread_id")
+        reservation_id = db_service.create_reservation({
+            "spot_id": selected_spot["id"],
+            "name": reservation_data["name"],
+            "car_number": reservation_data["car_number"],
+            "start_time": reservation_data["start_time"],
+            "end_time": reservation_data["end_time"],
+            "thread_id": thread_id
+        })
+    except Exception as e:
+        logger.error(f"Failed to create reservation in database: {e}")
+        return {
+            **state,
+            "messages": state["messages"] + [AIMessage(content="Error: Failed to create reservation. Please try again later.")],
+            "next_action": "wait_for_user"
+        }
 
     updated_reservation_data = {
         **reservation_data,
@@ -490,26 +601,31 @@ def status_checker_node(state: GraphState) -> GraphState:
         last_message = state["messages"][-1]
         user_input = last_message.content if hasattr(last_message, 'content') else str(last_message)
 
-        # Use LLM to extract name or car number if provided
-        llm = _get_llm()
-        extraction_prompt = f"""Extract name or license plate number from this query if present:
+        try:
+            # Use LLM to extract name or car number if provided
+            llm = _get_llm()
+            extraction_prompt = f"""Extract name or license plate number from this query if present:
 "{user_input}"
 
 Respond in format:
 name: [name or "none"]
 car_number: [license plate or "none"]
 """
-        extraction_response = llm.invoke([HumanMessage(content=extraction_prompt)])
+            extraction_response = llm.invoke([HumanMessage(content=extraction_prompt)])
+        except Exception as e:
+            logger.error(f"LLM extraction failed in status checker: {e}")
+            extraction_response = None
 
-        for line in extraction_response.content.split('\n'):
-            if ':' in line:
-                key, value = line.split(':', 1)
-                key = key.strip()
-                value = value.strip()
-                if value.lower() != "none" and key == "name":
-                    name = value
-                elif value.lower() != "none" and key == "car_number":
-                    car_number = value
+        if extraction_response:
+            for line in extraction_response.content.split('\n'):
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip()
+                    value = value.strip()
+                    if value.lower() != "none" and key == "name":
+                        name = value
+                    elif value.lower() != "none" and key == "car_number":
+                        car_number = value
 
     if not name and not car_number:
         response_text = """I don't have your reservation details in this conversation.
@@ -518,29 +634,38 @@ Could you provide your name or license plate number so I can look up your reserv
 For example: "Check status for John Smith" or "My plate is ABC-1234"
 """
     else:
-        # Use shared database service
-        with db_service.get_connection() as conn:
-            cursor = conn.cursor()
+        try:
+            # Use shared database service
+            with db_service.get_connection() as conn:
+                cursor = conn.cursor()
 
-            # Find most recent reservation for this user
-            cursor.execute("""
-                SELECT
-                    r.id,
-                    r.status,
-                    r.start_time,
-                    r.end_time,
-                    ps.spot_number,
-                    ps.spot_type,
-                    ps.floor,
-                    r.reservation_time
-                FROM reservations r
-                JOIN parking_spots ps ON r.spot_id = ps.id
-                WHERE r.user_name = ? OR r.car_number = ?
-                ORDER BY r.reservation_time DESC
-                LIMIT 1
-            """, (name or "", car_number or ""))
+                # Find most recent reservation for this user
+                cursor.execute("""
+                    SELECT
+                        r.id,
+                        r.status,
+                        r.start_time,
+                        r.end_time,
+                        ps.spot_number,
+                        ps.spot_type,
+                        ps.floor,
+                        r.reservation_time
+                    FROM reservations r
+                    JOIN parking_spots ps ON r.spot_id = ps.id
+                    WHERE r.user_name = ? OR r.car_number = ?
+                    ORDER BY r.reservation_time DESC
+                    LIMIT 1
+                """, (name or "", car_number or ""))
 
-            result = cursor.fetchone()
+                result = cursor.fetchone()
+        except Exception as e:
+            logger.error(f"Database query failed in status checker: {e}")
+            response_text = "I'm sorry, I couldn't retrieve your reservation status at this time. Please try again later."
+            return {
+                **state,
+                "messages": state["messages"] + [AIMessage(content=response_text)],
+                "next_action": "wait_for_user"
+            }
 
         if not result:
             response_text = f"""I couldn't find any reservations for {name or car_number}.
