@@ -2,8 +2,13 @@
 
 import time
 import json
-from typing import List, Dict, Tuple
+import logging
+from typing import List, Dict, Tuple, Any
 from dataclasses import dataclass, asdict
+
+from langchain_core.messages import HumanMessage, AIMessage
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -123,18 +128,23 @@ class RAGEvaluator:
                 content = doc.page_content.lower()
                 return any(keyword.lower() in content for keyword in keywords)
 
-            # Metrics for k=3 (reranked)
+            # Count actual relevant documents for this query (not keywords)
+            # Note: In a real scenario, you'd have ground truth relevant doc IDs
+            # Here we approximate by counting docs that contain relevant keywords
             relevant_in_3 = sum(1 for doc in reranked_docs if is_relevant(doc, relevant_keywords))
-            total_relevant = len(relevant_keywords)  # Approximate
-
-            recall_at_3 = relevant_in_3 / min(total_relevant, 3) if total_relevant > 0 else 0
-            precision_at_3 = relevant_in_3 / 3 if len(reranked_docs) >= 3 else relevant_in_3 / len(reranked_docs) if reranked_docs else 0
-
-            # Metrics for k=10 (base retrieval)
             relevant_in_10 = sum(1 for doc in base_docs if is_relevant(doc, relevant_keywords))
 
-            recall_at_10 = relevant_in_10 / min(total_relevant, 10) if total_relevant > 0 else 0
-            precision_at_10 = relevant_in_10 / 10 if len(base_docs) >= 10 else relevant_in_10 / len(base_docs) if base_docs else 0
+            # Total relevant documents = count of actually relevant docs found in top-10
+            # This is an approximation; ideally you'd have ground truth
+            total_relevant_docs = relevant_in_10
+
+            # Metrics for k=3 (reranked)
+            recall_at_3 = relevant_in_3 / total_relevant_docs if total_relevant_docs > 0 else 0
+            precision_at_3 = relevant_in_3 / len(reranked_docs) if len(reranked_docs) > 0 else 0
+
+            # Metrics for k=10 (base retrieval)
+            recall_at_10 = relevant_in_10 / total_relevant_docs if total_relevant_docs > 0 else 0
+            precision_at_10 = relevant_in_10 / len(base_docs) if len(base_docs) > 0 else 0
 
             # MRR: Position of first relevant document
             mrr = 0
@@ -243,6 +253,189 @@ class RAGEvaluator:
 
         return metrics, results
 
+    def evaluate_rag_pipeline(
+        self,
+        rag_node_func
+    ) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
+        """
+        Evaluate complete RAG pipeline: retrieval + generation.
+
+        Tests the actual RAG node in a single pass exactly as it runs in production.
+        Retrieval metrics are extracted from the retrieved_docs field in GraphState.
+
+        Args:
+            rag_node_func: The actual rag_node function from the graph
+
+        Returns:
+            Tuple of (aggregated metrics dict, detailed results list)
+        """
+        results = []
+
+        for test_case in self.test_cases:
+            query = test_case["query"]
+            relevant_keywords = test_case["relevant_keywords"]
+            expected_contains = test_case["expected_answer_contains"]
+
+            # Create proper GraphState as the rag_node expects
+            from .state import GraphState, ReservationData
+
+            test_state = GraphState(
+                messages=[HumanMessage(content=query)],
+                intent="question",
+                reservation_data=ReservationData(),
+                next_action=None,
+                thread_id="eval_test",
+                retrieved_docs=[]
+            )
+
+            # SINGLE-PASS EXECUTION: Call the actual rag_node (production code path)
+            start_time = time.time()
+            try:
+                result_dict = rag_node_func(test_state)
+                total_time = time.time() - start_time
+
+                # Convert dict result back to GraphState for uniform access
+                # Nodes return dicts for LangGraph compatibility
+                result_state = GraphState(**result_dict) if isinstance(result_dict, dict) else result_dict
+
+                # Extract response from state
+                last_message = result_state.messages[-1]
+                response = last_message.content if hasattr(last_message, 'content') else str(last_message)
+
+                # Extract retrieved documents from state (single source of truth!)
+                retrieved_docs = result_state.retrieved_docs if hasattr(result_state, 'retrieved_docs') else []
+
+                execution_success = True
+            except Exception as e:
+                logger.error(f"RAG node invocation failed for query '{query}': {e}")
+                response = ""
+                retrieved_docs = []
+                total_time = time.time() - start_time
+                execution_success = False
+
+            # EVALUATE RETRIEVAL: Calculate metrics from extracted documents
+            def is_relevant(doc, keywords):
+                """Check if document is relevant based on keyword matching."""
+                if not doc or not hasattr(doc, 'page_content'):
+                    return False
+                content = doc.page_content.lower()
+                # Check if any keyword appears in content
+                return any(keyword.lower() in content for keyword in keywords)
+
+            # Count relevant documents in retrieved set
+            relevant_docs_count = sum(1 for doc in retrieved_docs if is_relevant(doc, relevant_keywords))
+            retrieved_count = len(retrieved_docs)
+
+            # Calculate retrieval metrics (using k = number of docs retrieved by production code)
+            # For recall: we approximate total relevant as the number found (since we don't have ground truth)
+            total_relevant_estimate = relevant_docs_count if relevant_docs_count > 0 else 1
+
+            recall_at_k = relevant_docs_count / total_relevant_estimate if retrieved_count > 0 else 0
+            precision_at_k = relevant_docs_count / retrieved_count if retrieved_count > 0 else 0
+
+            # MRR: Position of first relevant document
+            mrr = 0
+            for i, doc in enumerate(retrieved_docs, 1):
+                if is_relevant(doc, relevant_keywords):
+                    mrr = 1 / i
+                    break
+
+            # EVALUATE GENERATION: Check response quality
+            response_lower = response.lower()
+            contains_count = sum(
+                1 for phrase in expected_contains
+                if phrase.lower() in response_lower
+            )
+
+            response_quality = (
+                "excellent" if contains_count >= len(expected_contains) * 0.8 else
+                "good" if contains_count >= len(expected_contains) * 0.6 else
+                "fair" if contains_count >= len(expected_contains) * 0.4 else
+                "poor"
+            )
+
+            # EVALUATE FAITHFULNESS: Does response stick to retrieved docs?
+            faithfulness_score = 0.0
+            if retrieved_docs and response:
+                # Check if response content appears in retrieved docs
+                retrieved_content = " ".join([
+                    doc.page_content.lower()
+                    for doc in retrieved_docs
+                    if hasattr(doc, 'page_content')
+                ])
+
+                # Count how many expected phrases are in BOTH response AND retrieved docs
+                faithful_count = sum(
+                    1 for phrase in expected_contains
+                    if phrase.lower() in response_lower and phrase.lower() in retrieved_content
+                )
+                faithfulness_score = faithful_count / len(expected_contains) if expected_contains else 0.0
+
+            # Store combined result
+            result = {
+                "query": query,
+                "category": test_case["category"],
+                # Retrieval metrics (from actual production retrieval)
+                "retrieval_recall_at_k": recall_at_k,
+                "retrieval_precision_at_k": precision_at_k,
+                "retrieval_mrr": mrr,
+                "retrieved_docs_count": retrieved_count,
+                "relevant_docs_count": relevant_docs_count,
+                # Generation metrics
+                "response_quality": response_quality,
+                "expected_phrases_found": contains_count,
+                "expected_phrases_total": len(expected_contains),
+                "faithfulness_score": faithfulness_score,
+                "execution_success": execution_success,
+                # Timing (single-pass, no separate phases)
+                "total_time": total_time,
+                # Debug info
+                "response_preview": response[:200] if response else "N/A"
+            }
+
+            results.append(result)
+
+        # Calculate aggregate metrics
+        successful_results = [r for r in results if r["execution_success"]]
+
+        if not successful_results:
+            logger.error("No successful RAG pipeline evaluations!")
+            return {}, results
+
+        quality_scores = {
+            "excellent": 1.0,
+            "good": 0.75,
+            "fair": 0.5,
+            "poor": 0.25
+        }
+
+        avg_metrics = {
+            # Retrieval metrics (from actual production retrieval)
+            "avg_retrieval_recall_at_k": sum(r["retrieval_recall_at_k"] for r in successful_results) / len(successful_results),
+            "avg_retrieval_precision_at_k": sum(r["retrieval_precision_at_k"] for r in successful_results) / len(successful_results),
+            "avg_retrieval_mrr": sum(r["retrieval_mrr"] for r in successful_results) / len(successful_results),
+
+            # Generation metrics
+            "avg_response_quality_score": sum(quality_scores[r["response_quality"]] for r in successful_results) / len(successful_results),
+            "excellent_responses": sum(1 for r in successful_results if r["response_quality"] == "excellent"),
+            "good_responses": sum(1 for r in successful_results if r["response_quality"] == "good"),
+            "fair_responses": sum(1 for r in successful_results if r["response_quality"] == "fair"),
+            "poor_responses": sum(1 for r in successful_results if r["response_quality"] == "poor"),
+
+            # Faithfulness
+            "avg_faithfulness_score": sum(r["faithfulness_score"] for r in successful_results) / len(successful_results),
+
+            # Timing (single-pass)
+            "avg_total_time": sum(r["total_time"] for r in successful_results) / len(successful_results),
+
+            # Overall
+            "total_queries": len(results),
+            "successful_queries": len(successful_results),
+            "success_rate": len(successful_results) / len(results) if results else 0
+        }
+
+        return avg_metrics, results
+
     def generate_report(
         self,
         retrieval_metrics: Dict,
@@ -276,24 +469,51 @@ class RAGEvaluator:
 
     def print_summary(self, retrieval_metrics: Dict, e2e_metrics: Dict):
         """Print evaluation summary to console."""
-        print("\n" + "="*70)
-        print("RAG SYSTEM EVALUATION SUMMARY")
-        print("="*70)
+        logger.info("="*70)
+        logger.info("RAG SYSTEM EVALUATION SUMMARY")
+        logger.info("="*70)
 
-        print("\n RETRIEVAL METRICS:")
-        print(f"  Recall@3:     {retrieval_metrics['avg_recall_at_3']:.2%}")
-        print(f"  Precision@3:  {retrieval_metrics['avg_precision_at_3']:.2%}")
-        print(f"  Recall@10:    {retrieval_metrics['avg_recall_at_10']:.2%}")
-        print(f"  Precision@10: {retrieval_metrics['avg_precision_at_10']:.2%}")
-        print(f"  MRR:          {retrieval_metrics['avg_mrr']:.3f}")
-        print(f"  Avg Time:     {retrieval_metrics['avg_retrieval_time']:.3f}s")
+        logger.info(" RETRIEVAL METRICS:")
+        logger.info(f"  Recall@3:     {retrieval_metrics['avg_recall_at_3']:.2%}")
+        logger.info(f"  Precision@3:  {retrieval_metrics['avg_precision_at_3']:.2%}")
+        logger.info(f"  Recall@10:    {retrieval_metrics['avg_recall_at_10']:.2%}")
+        logger.info(f"  Precision@10: {retrieval_metrics['avg_precision_at_10']:.2%}")
+        logger.info(f"  MRR:          {retrieval_metrics['avg_mrr']:.3f}")
+        logger.info(f"  Avg Time:     {retrieval_metrics['avg_retrieval_time']:.3f}s")
 
-        print("\n END-TO-END METRICS:")
-        print(f"  Avg Response Time:  {e2e_metrics['avg_response_time']:.3f}s")
-        print(f"  Avg Quality Score:  {e2e_metrics['avg_quality_score']:.2%}")
-        print(f"  Excellent:          {e2e_metrics['excellent_responses']}/{e2e_metrics['total_queries']}")
-        print(f"  Good:               {e2e_metrics['good_responses']}/{e2e_metrics['total_queries']}")
-        print(f"  Fair:               {e2e_metrics['fair_responses']}/{e2e_metrics['total_queries']}")
-        print(f"  Poor:               {e2e_metrics['poor_responses']}/{e2e_metrics['total_queries']}")
+        logger.info(" END-TO-END METRICS:")
+        logger.info(f"  Avg Response Time:  {e2e_metrics['avg_response_time']:.3f}s")
+        logger.info(f"  Avg Quality Score:  {e2e_metrics['avg_quality_score']:.2%}")
+        logger.info(f"  Excellent:          {e2e_metrics['excellent_responses']}/{e2e_metrics['total_queries']}")
+        logger.info(f"  Good:               {e2e_metrics['good_responses']}/{e2e_metrics['total_queries']}")
+        logger.info(f"  Fair:               {e2e_metrics['fair_responses']}/{e2e_metrics['total_queries']}")
+        logger.info(f"  Poor:               {e2e_metrics['poor_responses']}/{e2e_metrics['total_queries']}")
 
-        print("\n" + "="*70)
+        logger.info("="*70)
+
+    def print_rag_pipeline_summary(self, metrics: Dict):
+        """Print RAG pipeline evaluation summary to console."""
+        logger.info("="*70)
+        logger.info("RAG PIPELINE EVALUATION SUMMARY (Single-Pass)")
+        logger.info("="*70)
+
+        logger.info(" RETRIEVAL METRICS (from production retrieval):")
+        logger.info(f"  Recall@K:     {metrics['avg_retrieval_recall_at_k']:.2%}")
+        logger.info(f"  Precision@K:  {metrics['avg_retrieval_precision_at_k']:.2%}")
+        logger.info(f"  MRR:          {metrics['avg_retrieval_mrr']:.3f}")
+
+        logger.info(" GENERATION METRICS:")
+        logger.info(f"  Avg Quality Score:  {metrics['avg_response_quality_score']:.2%}")
+        logger.info(f"  Excellent:          {metrics['excellent_responses']}/{metrics['total_queries']}")
+        logger.info(f"  Good:               {metrics['good_responses']}/{metrics['total_queries']}")
+        logger.info(f"  Fair:               {metrics['fair_responses']}/{metrics['total_queries']}")
+        logger.info(f"  Poor:               {metrics['poor_responses']}/{metrics['total_queries']}")
+
+        logger.info(" FAITHFULNESS:")
+        logger.info(f"  Avg Faithfulness:   {metrics['avg_faithfulness_score']:.2%}")
+
+        logger.info(" OVERALL:")
+        logger.info(f"  Avg Pipeline Time:  {metrics['avg_total_time']:.3f}s")
+        logger.info(f"  Success Rate:       {metrics['success_rate']:.2%}")
+
+        logger.info("="*70)

@@ -1,32 +1,41 @@
 """State definitions for Admin Agent."""
 
-from typing import TypedDict, Annotated, List, Optional
-from langgraph.graph.message import add_messages
+from typing import List, Optional, Any
+from pydantic import BaseModel, Field
 
 
-class AdminActionData(TypedDict, total=False):
+class AdminActionData(BaseModel):
     """Admin action details."""
-    action_type: Optional[str]  # "approve" or "reject"
-    reservation_id: Optional[int]  # Which reservation
-    admin_notes: Optional[str]  # Optional notes
-    completed: Optional[bool]  # Action completed via API
+    action_type: Optional[str] = None  # "approve" or "reject"
+    reservation_id: Optional[int] = None  # Which reservation
+    admin_notes: Optional[str] = None  # Optional notes
+    completed: Optional[bool] = None  # Action completed via API
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
-class ReservationDetails(TypedDict, total=False):
+class ReservationDetails(BaseModel):
     """Reservation details for confirmation writing."""
-    reservation_id: Optional[int]
-    name: Optional[str]
-    car_number: Optional[str]
-    start_time: Optional[str]
-    end_time: Optional[str]
+    reservation_id: Optional[int] = None
+    name: Optional[str] = None
+    car_number: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
-class AdminGraphState(TypedDict):
+class AdminGraphState(BaseModel):
     """State for admin agent conversations."""
-    messages: Annotated[List, add_messages]
-    intent: Optional[str]  # "list_pending", "approve", "reject", "query"
-    action_data: AdminActionData
-    admin_id: Optional[str]  # Admin identifier
-    thread_id: Optional[str]  # Thread ID for API resumption
-    should_write_confirmation: Optional[bool]  # Flag to write confirmation
-    reservation_details: ReservationDetails  # Details for confirmation
+    messages: List[Any] = Field(default_factory=list)
+    intent: Optional[str] = None  # "list_pending", "approve", "reject", "query"
+    action_data: AdminActionData = Field(default_factory=AdminActionData)
+    admin_id: Optional[str] = None  # Admin identifier
+    thread_id: Optional[str] = None  # Thread ID for API resumption
+    should_write_confirmation: Optional[bool] = None  # Flag to write confirmation
+    reservation_details: ReservationDetails = Field(default_factory=ReservationDetails)  # Details for confirmation
+
+    class Config:
+        arbitrary_types_allowed = True

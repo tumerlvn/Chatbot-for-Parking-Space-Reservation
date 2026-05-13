@@ -1,7 +1,10 @@
 """Notification manager for handling system events."""
 
+import logging
 from typing import Dict, Any, Optional
 from .events import Event, global_event_bus, subscribe_to_events
+
+logger = logging.getLogger(__name__)
 
 
 class NotificationManager:
@@ -37,13 +40,13 @@ class NotificationManager:
         if not self.enabled:
             return
 
-        print(f"\n[EVENT] {event.event_type}")
-        print(f"  Source: {event.source}")
-        print(f"  Time: {event.timestamp}")
+        logger.info(f"[EVENT] {event.event_type}")
+        logger.info(f"  Source: {event.source}")
+        logger.info(f"  Time: {event.timestamp}")
         if event.data:
-            print(f"  Data:")
+            logger.info(f"  Data:")
             for key, value in event.data.items():
-                print(f"    - {key}: {value}")
+                logger.info(f"    - {key}: {value}")
 
     def _handle_reservation_created(self, event: Event):
         """
@@ -61,10 +64,10 @@ class NotificationManager:
             return
 
         data = event.data
-        print(f"\n📝 New reservation created!")
-        print(f"   Reservation ID: {data.get('reservation_id')}")
-        print(f"   User: {data.get('user_name')}")
-        print(f"   Status: Pending admin approval")
+        logger.info(f"📝 New reservation created!")
+        logger.info(f"   Reservation ID: {data.get('reservation_id')}")
+        logger.info(f"   User: {data.get('user_name')}")
+        logger.info(f"   Status: Pending admin approval")
 
     def _handle_reservation_approved(self, event: Event):
         """
@@ -82,10 +85,10 @@ class NotificationManager:
             return
 
         data = event.data
-        print(f"\n✅ Reservation approved!")
-        print(f"   Reservation ID: {data.get('reservation_id')}")
+        logger.info(f"✅ Reservation approved!")
+        logger.info(f"   Reservation ID: {data.get('reservation_id')}")
         if data.get('admin_notes'):
-            print(f"   Admin notes: {data.get('admin_notes')}")
+            logger.info(f"   Admin notes: {data.get('admin_notes')}")
 
     def _handle_reservation_rejected(self, event: Event):
         """
@@ -103,10 +106,10 @@ class NotificationManager:
             return
 
         data = event.data
-        print(f"\n❌ Reservation rejected")
-        print(f"   Reservation ID: {data.get('reservation_id')}")
+        logger.info(f"❌ Reservation rejected")
+        logger.info(f"   Reservation ID: {data.get('reservation_id')}")
         if data.get('admin_notes'):
-            print(f"   Reason: {data.get('admin_notes')}")
+            logger.info(f"   Reason: {data.get('admin_notes')}")
 
     def enable(self):
         """Enable notifications."""
@@ -133,10 +136,10 @@ class NotificationManager:
         if not self.enabled:
             return
 
-        print(f"\n[NOTIFICATION] {event_type}")
-        print(f"  {message}")
+        logger.info(f"[NOTIFICATION] {event_type}")
+        logger.info(f"  {message}")
         if data:
-            print(f"  Data: {data}")
+            logger.info(f"  Data: {data}")
 
 
 # Global notification manager instance

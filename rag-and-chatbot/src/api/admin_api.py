@@ -3,12 +3,15 @@
 import os
 import sqlite3
 import sys
+import logging
 from datetime import datetime
 from typing import Literal, Optional
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from src.chatbot.admin_graph import create_admin_graph
@@ -155,7 +158,7 @@ def approve_reservation(reservation_id: int, request: ApprovalRequest, thread_id
 
     # Get admin agent state using provided thread_id
     config = {"configurable": {"thread_id": thread_id}}
-    print(f"[API] Using thread_id: {thread_id}")
+    logger.info(f"[API] Using thread_id: {thread_id}")
 
     try:
         current_state = admin_agent_graph.get_state(config)
@@ -175,20 +178,20 @@ def approve_reservation(reservation_id: int, request: ApprovalRequest, thread_id
         }
 
         # Update state
-        print(f"[API] Updating action_data to: {updated_action_data}")
+        logger.info(f"[API] Updating action_data to: {updated_action_data}")
         admin_agent_graph.update_state(
             config,
             {"action_data": updated_action_data}
         )
 
         # Resume execution (will execute execute_action_node)
-        print(f"[API] Resuming admin agent graph for reservation #{reservation_id}")
+        logger.info(f"[API] Resuming admin agent graph for reservation #{reservation_id}")
 
         # Pass None as input to resume from interrupt
         result = admin_agent_graph.invoke(None, config)
 
-        print(f"[API] Graph execution result: {result}")
-        print(f"[API] Graph execution completed: action_data = {result.get('action_data', {})}")
+        logger.info(f"[API] Graph execution result: {result}")
+        logger.info(f"[API] Graph execution completed: action_data = {result.get('action_data', {})}")
 
         # Verify the database was updated
         with get_db_connection() as conn:
@@ -197,7 +200,7 @@ def approve_reservation(reservation_id: int, request: ApprovalRequest, thread_id
             db_result = cursor.fetchone()
             if db_result:
                 db_status = db_result[0]
-                print(f"[API] Database status for reservation #{reservation_id}: {db_status}")
+                logger.info(f"[API] Database status for reservation #{reservation_id}: {db_status}")
                 if db_status != "approved":
                     raise HTTPException(
                         status_code=500,
@@ -216,7 +219,7 @@ def approve_reservation(reservation_id: int, request: ApprovalRequest, thread_id
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[API] Error processing approval: {str(e)}")
+        logger.info(f"[API] Error processing approval: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(
@@ -268,7 +271,7 @@ def reject_reservation(reservation_id: int, request: ApprovalRequest, thread_id:
 
     # Get admin agent state using provided thread_id
     config = {"configurable": {"thread_id": thread_id}}
-    print(f"[API] Using thread_id: {thread_id}")
+    logger.info(f"[API] Using thread_id: {thread_id}")
 
     try:
         current_state = admin_agent_graph.get_state(config)
@@ -288,20 +291,20 @@ def reject_reservation(reservation_id: int, request: ApprovalRequest, thread_id:
         }
 
         # Update state
-        print(f"[API] Updating action_data to: {updated_action_data}")
+        logger.info(f"[API] Updating action_data to: {updated_action_data}")
         admin_agent_graph.update_state(
             config,
             {"action_data": updated_action_data}
         )
 
         # Resume execution (will execute execute_action_node)
-        print(f"[API] Resuming admin agent graph for reservation #{reservation_id}")
+        logger.info(f"[API] Resuming admin agent graph for reservation #{reservation_id}")
 
         # Pass None as input to resume from interrupt
         result = admin_agent_graph.invoke(None, config)
 
-        print(f"[API] Graph execution result: {result}")
-        print(f"[API] Graph execution completed: action_data = {result.get('action_data', {})}")
+        logger.info(f"[API] Graph execution result: {result}")
+        logger.info(f"[API] Graph execution completed: action_data = {result.get('action_data', {})}")
 
         # Verify the database was updated
         with get_db_connection() as conn:
@@ -310,7 +313,7 @@ def reject_reservation(reservation_id: int, request: ApprovalRequest, thread_id:
             db_result = cursor.fetchone()
             if db_result:
                 db_status = db_result[0]
-                print(f"[API] Database status for reservation #{reservation_id}: {db_status}")
+                logger.info(f"[API] Database status for reservation #{reservation_id}: {db_status}")
                 if db_status != "rejected":
                     raise HTTPException(
                         status_code=500,
@@ -329,7 +332,7 @@ def reject_reservation(reservation_id: int, request: ApprovalRequest, thread_id:
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[API] Error processing rejection: {str(e)}")
+        logger.info(f"[API] Error processing rejection: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(
@@ -388,9 +391,9 @@ def get_reservation_details(reservation_id: int):
 if __name__ == "__main__":
     import uvicorn
 
-    print("Starting SmartPark Admin API...")
-    print("API will be available at: http://localhost:8000")
-    print("API docs at: http://localhost:8000/docs")
+    logger.info("Starting SmartPark Admin API...")
+    logger.info("API will be available at: http://localhost:8000")
+    logger.info("API docs at: http://localhost:8000/docs")
 
     uvicorn.run(
         "src.api.admin_api:app",
